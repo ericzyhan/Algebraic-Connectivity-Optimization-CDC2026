@@ -12,6 +12,13 @@ def _dense_laplacian_eig(graph: nx.Graph):
     return vals[idx], vecs[:, idx]
 
 
+def _deterministic_v0(n: int) -> np.ndarray:
+    # Fix ARPACK start vector for deterministic eigsh behavior across resumes.
+    if n <= 0:
+        return np.zeros((0,), dtype=float)
+    return np.linspace(1.0, 2.0, num=n, dtype=float)
+
+
 def algebraic_connectivity(graph: nx.Graph) -> float:
     n = graph.number_of_nodes()
     if n < 2:
@@ -27,6 +34,7 @@ def algebraic_connectivity(graph: nx.Graph) -> float:
             which="SM",
             return_eigenvectors=False,
             tol=1e-6,
+            v0=_deterministic_v0(n),
         )
         vals = np.sort(np.real(vals))
         return float(vals[1])
@@ -50,6 +58,7 @@ def fiedler_vector(graph: nx.Graph) -> np.ndarray:
             which="SM",
             return_eigenvectors=True,
             tol=1e-6,
+            v0=_deterministic_v0(n),
         )
         order = np.argsort(np.real(vals))
         return np.asarray(np.real(vecs[:, order[1]]), dtype=float)

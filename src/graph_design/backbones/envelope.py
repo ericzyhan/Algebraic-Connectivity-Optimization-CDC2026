@@ -31,8 +31,8 @@ def _m_env(n: int, k: int) -> int:
     return int(value)
 
 
-def _max_feasible_env_level(n: int, m_target: int) -> int:
-    # m_env(k) is monotone nondecreasing on k in [1, n-2], so we can binary-search.
+def _max_feasible_level(n: int, m_target: int) -> int:
+    # m_env(k) is monotone nondecreasing in k on [1, n-2].
     lo, hi = 1, n - 2
     best = 1
     while lo <= hi:
@@ -76,16 +76,17 @@ class EnvelopeBackboneGenerator(BackboneGenerator):
         if n <= 2:
             return None
 
-        k_level = _max_feasible_env_level(n=n, m_target=m_target)
-        parts = _partition_for_level(n, k_level)
+        k = _max_feasible_level(n, m_target)
+        edges = _m_env(n, k)
+        parts = _partition_for_level(n, k)
         graph = nx.complete_multipartite_graph(*parts)
         return BackboneCandidate(
             family=self.family,
             graph=graph,
-            backbone_lambda2=float(k_level),  # closed form: lambda_2 = k for 1 <= k <= n-2
+            backbone_lambda2=float(k),
             metadata={
-                "k_level": k_level,
+                "k_level": k,
                 "parts": parts,
-                "m_env": _m_env(n, k_level),
+                "m_env": edges,
             },
         )

@@ -3,10 +3,7 @@ from __future__ import annotations
 import random
 import time
 
-from graph_design.backbones.cayley import (
-    CayleyBackboneGenerator,
-    RandomCayleyBackboneGenerator,
-)
+from graph_design.backbones.cayley import CayleyBackboneGenerator
 from graph_design.backbones.envelope import EnvelopeBackboneGenerator
 from graph_design.baselines.registry import create_baseline
 from graph_design.completion.base import CompletionPolicy
@@ -30,19 +27,7 @@ class HybridGraphDesigner:
         self.routing = DensityRoutingPolicy(self.config)
         self.completion_policy = completion_policy or FVGCompletionPolicy()
         self.envelope_generator = envelope_generator or EnvelopeBackboneGenerator()
-        if cayley_generator is not None:
-            self.cayley_generator = cayley_generator
-        else:
-            mode = str(self.config.cayley_generation_mode).strip().lower()
-            if mode == "coset":
-                self.cayley_generator = CayleyBackboneGenerator(generation_mode="coset")
-            elif mode == "random":
-                self.cayley_generator = RandomCayleyBackboneGenerator()
-            else:
-                raise ValueError(
-                    "Unsupported cayley_generation_mode: "
-                    f"{self.config.cayley_generation_mode}. Use 'coset' or 'random'."
-                )
+        self.cayley_generator = cayley_generator or CayleyBackboneGenerator()
 
     def solve(self, problem: DesignProblem) -> DesignResult:
         validate_problem(problem)

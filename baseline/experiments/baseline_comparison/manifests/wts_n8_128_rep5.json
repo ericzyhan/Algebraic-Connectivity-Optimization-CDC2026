@@ -1,0 +1,48 @@
+﻿{
+  "name": "wts_only",
+  "n_values": [
+    8,
+    16,
+    32,
+    64,
+    128
+  ],
+  "points_per_n": 100,
+  "repeats": 5,
+  "progress_every": 200,
+  "methods_default": [
+    "path_wts"
+  ],
+  "common_params": {
+    "mdmd_seed": 0,
+    "mdmd_random_tie": false,
+    "wts_seed": 0,
+    "wts_iterations": 1000,
+    "wts_tabu_tenure": 100,
+    "wts_max_old_edges_per_iter": 8,
+    "wts_neighbor_sample_per_old": 3,
+    "wts_random_jump_per_old": 1,
+    "wts_init_mode": "random",
+    "mac_fw_iters": 50,
+    "mac_duality_gap_tol": 1e-06,
+    "mac_init_mode": "fiedler_topk",
+    "mac_seed": 0,
+    "kopt_k": 2,
+    "kopt_m": 10,
+    "kopt_max_rounds": 10,
+    "kopt_combo_cap_add": 500,
+    "kopt_combo_cap_del": 500,
+    "kopt_seed": 0,
+    "sdp_solver": "MOSEK",
+    "sdp_max_iters": 50000,
+    "sdp_eps": 1e-06,
+    "sdp_verbose": false,
+    "oa_solver": "GUROBI",
+    "oa_max_iters": 60,
+    "oa_tol": 1e-06,
+    "oa_verbose": false,
+    "oa_warm_start_fvg": true
+  },
+  "out_csv": "logs/baseline_comparison/eval_wts_n8_128_rep5.csv",
+  "out_meta": "logs/baseline_comparison/eval_wts_n8_128_rep5.meta.json"
+}

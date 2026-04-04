@@ -29,13 +29,19 @@ def _lift_nodes_needed(n: int, index: int) -> int:
     return (index - (n % index)) % index
 
 
-def _index_edge_interval(index: int, *, index2_upper: float = 0.5) -> tuple[float, float]:
+def _index_edge_interval(
+    index: int,
+    *,
+    index2_upper: float = 0.5,
+    index3_upper: float = 2.0 / 3.0,
+    index4_low: float = 2.0 / 3.0,
+) -> tuple[float, float]:
     if index == 2:
         return (0.0, index2_upper)
     if index == 3:
-        return (0.5, 2.0 / 3.0)
+        return (0.5, index3_upper)
     if index == 4:
-        return (2.0 / 3.0, 0.75)
+        return (index4_low, 0.75)
     raise ValueError(f"Unsupported index: {index}")
 
 
@@ -62,6 +68,8 @@ def _score_index_candidate(
     index: int,
     *,
     index2_upper: float = 0.5,
+    index3_upper: float = 2.0 / 3.0,
+    index4_low: float = 2.0 / 3.0,
 ) -> _PocketScore:
     j = _lift_nodes_needed(n, index)
     lifted_n = n + j
@@ -70,7 +78,12 @@ def _score_index_candidate(
     k_max = max(1, min(lifted_n - 1, k_max))
     m_proj = int((k_max * denom) // 2)
     edge_ratio = (2.0 * float(m_proj) / float(n * n)) if n > 0 else 0.0
-    pocket_low, pocket_high = _index_edge_interval(index, index2_upper=index2_upper)
+    pocket_low, pocket_high = _index_edge_interval(
+        index,
+        index2_upper=index2_upper,
+        index3_upper=index3_upper,
+        index4_low=index4_low,
+    )
     in_pocket = _in_open_interval(edge_ratio, pocket_low, pocket_high)
     return _PocketScore(
         index=index,
@@ -90,15 +103,21 @@ def _score_index_candidates(
     m: int,
     *,
     index2_upper: float = 0.5,
+    index3_upper: float = 2.0 / 3.0,
+    index4_low: float = 2.0 / 3.0,
+    enable_index4: bool = True,
 ) -> dict[int, _PocketScore]:
+    index_set = (2, 3, 4) if enable_index4 else (2, 3)
     return {
         index: _score_index_candidate(
             n=n,
             m=m,
             index=index,
             index2_upper=index2_upper,
+            index3_upper=index3_upper,
+            index4_low=index4_low,
         )
-        for index in (2, 3, 4)
+        for index in index_set
     }
 
 
@@ -281,6 +300,19 @@ def _sample_generators(
     return output
 
 
+def _sample_generators_random(
+    *,
+    desired_degree: int,
+    rng: random.Random,
+    full_sampler: _InverseClosedSampler,
+) -> set[int] | None:
+    if desired_degree <= 0:
+        return None
+    if not full_sampler.feasible(desired_degree):
+        return None
+    return full_sampler.sample(desired_degree, rng)
+
+
 def _degree_sampler_need(
     *,
     desired_degree: int,
@@ -330,18 +362,50 @@ def _largest_feasible_degree_leq(
     return None
 
 
+def _is_degree_feasible_random(
+    *,
+    desired_degree: int,
+    full_sampler: _InverseClosedSampler,
+) -> bool:
+    if desired_degree <= 0:
+        return False
+    return full_sampler.feasible(desired_degree)
+
+
+def _largest_feasible_degree_leq_random(
+    *,
+    max_degree: int,
+    min_degree: int,
+    full_sampler: _InverseClosedSampler,
+) -> int | None:
+    for degree in range(max_degree, min_degree - 1, -1):
+        if _is_degree_feasible_random(
+            desired_degree=degree,
+            full_sampler=full_sampler,
+        ):
+            return degree
+    return None
+
+
 class _LiftDeleteBatchEvaluator:
     def __init__(
         self,
         *,
         group,
-        delete_count: int,
+        delete_nodes: tuple[int, ...],
         backend: str,
     ) -> None:
         self.group = group
         self.n = group.order
-        self.delete_count = delete_count
-        self.keep = np.arange(delete_count, self.n, dtype=np.int32)
+        raw_delete = sorted(set(int(node) for node in delete_nodes))
+        if any(node < 0 or node >= self.n for node in raw_delete):
+            raise ValueError(
+                f"delete_nodes must be within [0, {self.n - 1}], got {raw_delete}"
+            )
+        delete_arr = np.asarray(raw_delete, dtype=np.int32)
+        keep_mask = np.ones((self.n,), dtype=bool)
+        keep_mask[delete_arr] = False
+        self.keep = np.nonzero(keep_mask)[0].astype(np.int32)
         if self.keep.size < 2:
             raise ValueError("Need at least 2 kept nodes to evaluate lambda_2.")
 
@@ -446,6 +510,206 @@ class _LiftDeleteBatchEvaluator:
         return np.asarray(l2, dtype=np.float64), np.asarray(edges_np, dtype=np.int64)
 
 
+class _CyclicNoDeleteCharacteristicEvaluator:
+    r"""
+    Exact Laplacian lambda_2 for cyclic Cayley graphs with no node deletion.
+
+    For G = Z_n and generator indicator a \in {0,1}^n, adjacency eigenvalues are
+    the DFT coefficients of a. Since L = kI - A (k-regular), lambda_2 is:
+        lambda_2 = k - max_{j != 0} lambda_j(A)
+    """
+
+    def __init__(self, *, group: _CyclicGroup) -> None:
+        self.group = group
+        self.n = int(group.order)
+        if self.n < 2:
+            raise ValueError("Need n >= 2 for cyclic characteristic evaluation.")
+
+    def lambda2_edges_from_index_matrix(
+        self,
+        generator_index_matrix: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        idx = np.asarray(generator_index_matrix, dtype=np.int32)
+        if idx.ndim != 2:
+            raise ValueError("generator_index_matrix must have shape [batch, degree].")
+        if idx.shape[0] == 0:
+            empty = np.empty((0,), dtype=np.float64)
+            empty_i = np.empty((0,), dtype=np.int64)
+            return empty, empty_i
+        if idx.shape[1] == 0:
+            zeros = np.zeros((idx.shape[0],), dtype=np.float64)
+            zeros_i = np.zeros((idx.shape[0],), dtype=np.int64)
+            return zeros, zeros_i
+
+        b, d = idx.shape
+        n = self.n
+
+        # Indicator of generator set for each sample row.
+        indicator = np.zeros((b, n), dtype=np.float64)
+        row_idx = np.arange(b, dtype=np.int32)[:, None]
+        indicator[row_idx, idx] = 1.0
+        indicator[:, 0] = 0.0  # identity is never a valid generator
+
+        # Adjacency eigenvalues are exact DFT coefficients for circulant Cayley adjacency.
+        adj_eigs = np.fft.fft(indicator, axis=1).real
+        max_nontrivial_adj = np.max(adj_eigs[:, 1:], axis=1)
+        degree = np.sum(indicator, axis=1)
+
+        lambda2 = np.maximum(degree - max_nontrivial_adj, 0.0)
+        edges = np.rint(degree * float(n) / 2.0).astype(np.int64)
+        return np.asarray(lambda2, dtype=np.float64), np.asarray(edges, dtype=np.int64)
+
+
+class _DihedralNoDeleteCharacteristicEvaluator:
+    """
+    Exact Laplacian lambda_2 for dihedral Cayley graphs with no node deletion.
+
+    Supports groups encoded by _SemidirectGroup with twist == -1 (mod half), i.e.,
+    D_m of order 2m. Adjacency eigenvalues are computed from irreducible characters:
+    1D irreps (2 or 4) plus all 2D irreps.
+    """
+
+    def __init__(self, *, group: _SemidirectGroup) -> None:
+        if int(group.order) % 2 != 0:
+            raise ValueError("Dihedral evaluator requires even group order.")
+        if int(group.twist) % int(group.half) != (int(group.half) - 1) % int(group.half):
+            raise ValueError("Dihedral evaluator requires twist == -1 mod half.")
+
+        self.group = group
+        self.n = int(group.order)
+        self.m = int(group.half)
+        if self.m < 1:
+            raise ValueError("Invalid dihedral half-order.")
+
+        # 2D irrep indices l:
+        # - m odd:  l = 1..(m-1)/2
+        # - m even: l = 1..(m/2 - 1)
+        l_max = (self.m - 1) // 2 if (self.m % 2 == 1) else (self.m // 2 - 1)
+        self._l_values = np.arange(1, max(0, l_max) + 1, dtype=np.int32)
+
+        if self._l_values.size > 0:
+            a = np.arange(self.m, dtype=np.float64)[None, :]
+            l = self._l_values.astype(np.float64)[:, None]
+            theta = 2.0 * np.pi * l * a / float(self.m)
+            self._cos = np.cos(theta)
+            self._sin = np.sin(theta)
+        else:
+            self._cos = np.empty((0, self.m), dtype=np.float64)
+            self._sin = np.empty((0, self.m), dtype=np.float64)
+
+        self._parity_a = np.where((np.arange(self.m, dtype=np.int32) % 2) == 0, 1.0, -1.0)
+
+    def lambda2_edges_from_index_matrix(
+        self,
+        generator_index_matrix: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        idx = np.asarray(generator_index_matrix, dtype=np.int32)
+        if idx.ndim != 2:
+            raise ValueError("generator_index_matrix must have shape [batch, degree].")
+        if idx.shape[0] == 0:
+            empty = np.empty((0,), dtype=np.float64)
+            empty_i = np.empty((0,), dtype=np.int64)
+            return empty, empty_i
+        if idx.shape[1] == 0:
+            zeros = np.zeros((idx.shape[0],), dtype=np.float64)
+            zeros_i = np.zeros((idx.shape[0],), dtype=np.int64)
+            return zeros, zeros_i
+
+        bsz, d = idx.shape
+        m = self.m
+
+        a = np.mod(idx, m).astype(np.int32)
+        b = (idx // m).astype(np.int32)  # 0=rotation coset, 1=reflection coset
+        rot_mask = (b == 0)
+        refl_sign = np.where(rot_mask, 1.0, -1.0)
+        degree = np.full((bsz,), float(d), dtype=np.float64)
+
+        # Track largest adjacency eigenvalue among nontrivial irreps.
+        max_nontrivial_adj = np.full((bsz,), -np.inf, dtype=np.float64)
+
+        # 1D irrep: r -> +1, s -> -1.
+        cnt_rot = np.sum(rot_mask, axis=1, dtype=np.int32)
+        cnt_refl = d - cnt_rot
+        chi2 = cnt_rot.astype(np.float64) - cnt_refl.astype(np.float64)
+        max_nontrivial_adj = np.maximum(max_nontrivial_adj, chi2)
+
+        # Additional two 1D irreps exist when m is even.
+        if (m % 2) == 0:
+            parity = self._parity_a[a]  # (-1)^a
+            chi3 = np.sum(parity, axis=1)
+            chi4 = np.sum(parity * refl_sign, axis=1)
+            max_nontrivial_adj = np.maximum(max_nontrivial_adj, chi3)
+            max_nontrivial_adj = np.maximum(max_nontrivial_adj, chi4)
+
+        # 2D irreps: rho_l, l in self._l_values.
+        for li in range(self._l_values.size):
+            cos = self._cos[li][a]
+            sin = self._sin[li][a]
+
+            # M_l = sum_{(a,b) in S} R(a*theta_l) F^b
+            # where F = diag(1,-1)
+            a11 = np.sum(cos, axis=1)
+            a12 = np.sum(np.where(rot_mask, -sin, sin), axis=1)
+            a21 = np.sum(sin, axis=1)
+            a22 = np.sum(np.where(rot_mask, cos, -cos), axis=1)
+
+            tr = a11 + a22
+            det = a11 * a22 - a12 * a21
+            disc = np.sqrt(np.maximum(tr * tr - 4.0 * det, 0.0))
+            e1 = 0.5 * (tr + disc)
+            e2 = 0.5 * (tr - disc)
+            pair_max = np.maximum(e1, e2)
+            max_nontrivial_adj = np.maximum(max_nontrivial_adj, pair_max)
+
+        lambda2 = np.maximum(degree - max_nontrivial_adj, 0.0)
+        edges = np.rint(degree * float(self.n) / 2.0).astype(np.int64)
+        return np.asarray(lambda2, dtype=np.float64), np.asarray(edges, dtype=np.int64)
+
+
+def _build_batch_evaluator(
+    *,
+    group,
+    delete_nodes: tuple[int, ...],
+    config: DesignConfig,
+) -> tuple[object, str]:
+    eval_mode = str(getattr(config, "cayley_eval_mode", "dense")).strip().lower()
+    if eval_mode not in {"dense", "character"}:
+        raise ValueError(
+            "cayley_eval_mode must be one of {'dense','character'}, "
+            f"got {eval_mode!r}."
+        )
+
+    if (
+        eval_mode == "character"
+        and not delete_nodes
+        and isinstance(group, _CyclicGroup)
+    ):
+        return (
+            _CyclicNoDeleteCharacteristicEvaluator(group=group),
+            "character_cyclic_no_delete",
+        )
+
+    if (
+        eval_mode == "character"
+        and not delete_nodes
+        and isinstance(group, _SemidirectGroup)
+        and int(group.twist) % int(group.half) == (int(group.half) - 1) % int(group.half)
+    ):
+        return (
+            _DihedralNoDeleteCharacteristicEvaluator(group=group),
+            "character_dihedral_no_delete",
+        )
+
+    return (
+        _LiftDeleteBatchEvaluator(
+            group=group,
+            delete_nodes=delete_nodes,
+            backend=config.cayley_spectral_backend,
+        ),
+        "dense_laplacian",
+    )
+
+
 def _build_cayley_graph(group, generators: set[int]) -> nx.Graph:
     graph = nx.Graph()
     graph.add_nodes_from(range(group.order))
@@ -461,7 +725,6 @@ def _build_cayley_graph(group, generators: set[int]) -> nx.Graph:
 @dataclass
 class CayleyBackboneGenerator(BackboneGenerator):
     family: str = "cayley"
-    generation_mode: str = "coset"  # coset, random
 
     def generate(
         self,
@@ -469,16 +732,44 @@ class CayleyBackboneGenerator(BackboneGenerator):
         config: DesignConfig,
         rng: random.Random,
     ) -> BackboneCandidate | None:
-        mode = self._normalized_mode()
-        index2_upper = (
-            config.cayley_index2_overlap_high
-            if config.cayley_multi_index_overlap
-            else 0.5
-        )
+        eval_mode = str(getattr(config, "cayley_eval_mode", "dense")).strip().lower()
+        if eval_mode not in {"dense", "character"}:
+            raise ValueError(
+                "cayley_eval_mode must be one of {'dense','character'}, "
+                f"got {eval_mode!r}."
+            )
+        sampling_mode = str(config.cayley_sampling_mode).strip().lower()
+        if sampling_mode not in {"coset", "random"}:
+            raise ValueError(
+                "cayley_sampling_mode must be one of {'coset','random'}, "
+                f"got {sampling_mode!r}."
+            )
+        enable_index4 = bool(config.cayley_enable_index4)
+        index2_upper = float(config.cayley_index2_overlap_high)
+        index3_upper = float(config.cayley_index3_overlap_high)
+        index4_low = float(config.cayley_index4_overlap_low)
+        if not (0.0 < index2_upper < 0.75):
+            raise ValueError(
+                "cayley_index2_overlap_high must satisfy 0 < value < 0.75, "
+                f"got {index2_upper!r}."
+            )
+        if not (0.5 < index3_upper < 0.75):
+            raise ValueError(
+                "cayley_index3_overlap_high must satisfy 0.5 < value < 0.75, "
+                f"got {index3_upper!r}."
+            )
+        if enable_index4 and not (0.5 < index4_low < 0.75):
+            raise ValueError(
+                "cayley_index4_overlap_low must satisfy 0.5 < value < 0.75, "
+                f"got {index4_low!r}."
+            )
         scores = _score_index_candidates(
             n=problem.n,
             m=problem.m,
             index2_upper=index2_upper,
+            index3_upper=index3_upper,
+            index4_low=index4_low,
+            enable_index4=enable_index4,
         )
         valid_scores = _valid_scores(scores)
         if not valid_scores:
@@ -492,10 +783,13 @@ class CayleyBackboneGenerator(BackboneGenerator):
                 problem=problem,
                 config=config,
                 rng=rng,
-                mode=mode,
                 selected=selected,
                 scores=scores,
                 index2_upper=index2_upper,
+                index3_upper=index3_upper,
+                index4_low=index4_low,
+                enable_index4=enable_index4,
+                sampling_mode=sampling_mode,
                 evaluated_indices=[selected.index],
             )
 
@@ -506,10 +800,13 @@ class CayleyBackboneGenerator(BackboneGenerator):
                 problem=problem,
                 config=config,
                 rng=rng,
-                mode=mode,
                 selected=selected,
                 scores=scores,
                 index2_upper=index2_upper,
+                index3_upper=index3_upper,
+                index4_low=index4_low,
+                enable_index4=enable_index4,
+                sampling_mode=sampling_mode,
                 evaluated_indices=evaluated_indices,
             )
             if candidate is not None:
@@ -523,25 +820,19 @@ class CayleyBackboneGenerator(BackboneGenerator):
     def _candidate_key(candidate: BackboneCandidate) -> tuple[float, int]:
         return (candidate.backbone_lambda2, candidate.graph.number_of_edges())
 
-    def _normalized_mode(self) -> str:
-        mode = str(self.generation_mode).strip().lower()
-        if mode not in {"coset", "random"}:
-            raise ValueError(
-                f"Unsupported Cayley generation_mode={self.generation_mode!r}. "
-                "Use 'coset' or 'random'."
-            )
-        return mode
-
     def _generate_for_score(
         self,
         *,
         problem: DesignProblem,
         config: DesignConfig,
         rng: random.Random,
-        mode: str,
         selected: _PocketScore,
         scores: dict[int, _PocketScore],
         index2_upper: float,
+        index3_upper: float,
+        index4_low: float,
+        enable_index4: bool,
+        sampling_mode: str,
         evaluated_indices: list[int],
     ) -> BackboneCandidate | None:
         group = _build_group(
@@ -549,18 +840,28 @@ class CayleyBackboneGenerator(BackboneGenerator):
             index=selected.index,
             lift_nodes=selected.lift_nodes,
         )
+        subgroup, nontrivial_union = _split_cosets(group, selected.index)
+        if not nontrivial_union:
+            return None
+
+        subgroup_no_identity = [g for g in subgroup if g != 0]
+        nontrivial_sampler = _InverseClosedSampler(group, nontrivial_union)
+        subgroup_sampler = _InverseClosedSampler(group, subgroup_no_identity)
+        full_no_identity = [g for g in range(group.order) if g != 0]
+        full_sampler = _InverseClosedSampler(group, full_no_identity)
+
+        delete_nodes: tuple[int, ...] = ()
+        if selected.lift_nodes > 0:
+            delete_nodes = tuple(sorted(rng.sample(range(group.order), selected.lift_nodes)))
+
         max_degree = min(group.order - 1, selected.k_max)
-
-        random_pool_size: int | None = None
-        if mode == "coset":
-            subgroup, nontrivial_union = _split_cosets(group, selected.index)
-            if not nontrivial_union:
-                return None
-
-            subgroup_no_identity = [g for g in subgroup if g != 0]
-            nontrivial_sampler = _InverseClosedSampler(group, nontrivial_union)
-            subgroup_sampler = _InverseClosedSampler(group, subgroup_no_identity)
-
+        if sampling_mode == "random":
+            feasible_cap = _largest_feasible_degree_leq_random(
+                max_degree=max_degree,
+                min_degree=1,
+                full_sampler=full_sampler,
+            )
+        else:
             feasible_cap = _largest_feasible_degree_leq(
                 max_degree=max_degree,
                 min_degree=1,
@@ -568,70 +869,57 @@ class CayleyBackboneGenerator(BackboneGenerator):
                 nontrivial_sampler=nontrivial_sampler,
                 subgroup_sampler=subgroup_sampler,
             )
+        if feasible_cap is None:
+            return None
 
-            def degree_feasible(degree: int) -> bool:
-                return _is_degree_feasible(
+        low_d = max(1, feasible_cap - config.cayley_degree_slack)
+        if sampling_mode == "random":
+            feasible_degrees = [
+                degree
+                for degree in range(low_d, feasible_cap + 1)
+                if _is_degree_feasible_random(
+                    desired_degree=degree,
+                    full_sampler=full_sampler,
+                )
+            ]
+        else:
+            feasible_degrees = [
+                degree
+                for degree in range(low_d, feasible_cap + 1)
+                if _is_degree_feasible(
                     desired_degree=degree,
                     nontrivial_size=len(nontrivial_union),
                     nontrivial_sampler=nontrivial_sampler,
                     subgroup_sampler=subgroup_sampler,
                 )
-
-            def sample_for_degree(degree: int) -> set[int] | None:
-                return _sample_generators(
-                    nontrivial_union=nontrivial_union,
-                    subgroup_no_identity=subgroup_no_identity,
-                    desired_degree=degree,
-                    rng=rng,
-                    nontrivial_sampler=nontrivial_sampler,
-                    subgroup_sampler=subgroup_sampler,
-                )
-
-        else:
-            full_pool = [g for g in range(group.order) if g != 0]
-            if not full_pool:
-                return None
-            random_pool_size = len(full_pool)
-            random_sampler = _InverseClosedSampler(group, full_pool)
-
-            def degree_feasible(degree: int) -> bool:
-                return random_sampler.feasible(degree)
-
-            feasible_cap = None
-            for degree in range(max_degree, 0, -1):
-                if degree_feasible(degree):
-                    feasible_cap = degree
-                    break
-
-            def sample_for_degree(degree: int) -> set[int] | None:
-                if not degree_feasible(degree):
-                    return None
-                return random_sampler.sample(degree, rng)
-
-        if feasible_cap is None:
-            return None
-
-        low_d = max(1, feasible_cap - config.cayley_degree_slack)
-        feasible_degrees = [
-            degree
-            for degree in range(low_d, feasible_cap + 1)
-            if degree_feasible(degree)
-        ]
+            ]
         if not feasible_degrees:
             return None
 
         sample_count = max(1, config.cayley_samples)
         samples_by_degree: dict[int, list[np.ndarray]] = defaultdict(list)
+        seen_by_degree: dict[int, set[tuple[int, ...]]] = defaultdict(set)
         for _ in range(sample_count):
             desired_degree = (
                 rng.choice(feasible_degrees)
                 if len(feasible_degrees) > 1
                 else feasible_degrees[0]
             )
-            try:
-                generators = sample_for_degree(desired_degree)
-            except ValueError:
-                continue
+            if sampling_mode == "random":
+                generators = _sample_generators_random(
+                    desired_degree=desired_degree,
+                    rng=rng,
+                    full_sampler=full_sampler,
+                )
+            else:
+                generators = _sample_generators(
+                    nontrivial_union=nontrivial_union,
+                    subgroup_no_identity=subgroup_no_identity,
+                    desired_degree=desired_degree,
+                    rng=rng,
+                    nontrivial_sampler=nontrivial_sampler,
+                    subgroup_sampler=subgroup_sampler,
+                )
             if not generators:
                 continue
             idx = np.fromiter(
@@ -639,15 +927,20 @@ class CayleyBackboneGenerator(BackboneGenerator):
                 dtype=np.int32,
                 count=len(generators),
             )
-            samples_by_degree[len(idx)].append(idx)
+            degree = int(len(idx))
+            key = tuple(int(x) for x in idx.tolist())
+            if key in seen_by_degree[degree]:
+                continue
+            seen_by_degree[degree].add(key)
+            samples_by_degree[degree].append(idx)
 
         if not samples_by_degree:
             return None
 
-        evaluator = _LiftDeleteBatchEvaluator(
+        evaluator, eval_backend = _build_batch_evaluator(
             group=group,
-            delete_count=selected.lift_nodes,
-            backend=config.cayley_spectral_backend,
+            delete_nodes=delete_nodes,
+            config=config,
         )
         batch_size = max(1, config.cayley_eval_batch_size)
 
@@ -685,9 +978,9 @@ class CayleyBackboneGenerator(BackboneGenerator):
             return None
 
         graph = _build_cayley_graph(group, set(int(x) for x in best_indices))
-        if selected.lift_nodes > 0:
+        if delete_nodes:
             graph = graph.copy()
-            graph.remove_nodes_from(range(selected.lift_nodes))
+            graph.remove_nodes_from(delete_nodes)
             graph = relabel_to_integers(graph)
 
         if graph.number_of_nodes() != problem.n:
@@ -711,13 +1004,20 @@ class CayleyBackboneGenerator(BackboneGenerator):
             "m_lift": int(best_m_lift if best_m_lift is not None else 0),
             "m_after_delete": int(best_m_after if best_m_after is not None else 0),
             "deleted_edges": int(best_deleted if best_deleted is not None else 0),
+            "sample_count_requested": int(sample_count),
+            "sample_count_unique": int(sum(len(rows) for rows in samples_by_degree.values())),
+            "delete_nodes_count": int(len(delete_nodes)),
+            "delete_nodes": ",".join(str(node) for node in delete_nodes),
+            "eval_mode": str(getattr(config, "cayley_eval_mode", "dense")),
+            "eval_backend": str(eval_backend),
             "multi_index_overlap": bool(config.cayley_multi_index_overlap),
+            "sampling_mode": str(sampling_mode),
+            "enable_index4": bool(enable_index4),
             "index2_pocket_high": float(index2_upper),
+            "index3_pocket_high": float(index3_upper),
+            "index4_pocket_low": float(index4_low),
             "evaluated_indices": ",".join(str(x) for x in evaluated_indices),
-            "generation_mode": mode,
         }
-        if random_pool_size is not None:
-            metadata["random_pool_size"] = int(random_pool_size)
         for index, score in scores.items():
             metadata[f"j_{index}"] = score.lift_nodes
             metadata[f"k_max_{index}"] = score.k_max
@@ -731,8 +1031,3 @@ class CayleyBackboneGenerator(BackboneGenerator):
             backbone_lambda2=best_lambda2,
             metadata=metadata,
         )
-
-
-@dataclass
-class RandomCayleyBackboneGenerator(CayleyBackboneGenerator):
-    generation_mode: str = "random"

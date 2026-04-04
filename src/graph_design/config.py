@@ -13,10 +13,14 @@ class DesignConfig:
     cayley_samples: int = 500  # Tunable via CLI flag --cayley-samples.
     cayley_degree_slack: int = 0
     cayley_multi_index_overlap: bool = False
+    cayley_enable_index4: bool = True
+    cayley_sampling_mode: str = "coset"  # coset, random
     cayley_index2_overlap_high: float = 0.6
+    cayley_index3_overlap_high: float = 2.0 / 3.0
+    cayley_index4_overlap_low: float = 2.0 / 3.0
     cayley_eval_batch_size: int = 128
     cayley_spectral_backend: str = "cpu"  # cpu, cuda (optional)
-    cayley_generation_mode: str = "coset"  # coset, random
+    cayley_eval_mode: str = "dense"  # dense, character
     fvg_reuse_cache: bool = True
     fvg_max_steps: int | None = None
     force_connected_backbone: bool = True
