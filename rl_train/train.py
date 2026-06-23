@@ -108,18 +108,18 @@ def _select_actions(
     values: List[float] = []
 
     with torch.no_grad():
-        for obs in observations:
-            output = model.forward_observation(obs, device=device)
-            dist = Categorical(logits=output.logits)
+        logits_list, values_tensor = model.forward_batched(observations, device)
+        for i, logits in enumerate(logits_list):
+            dist = Categorical(logits=logits)
             action_idx_t = dist.sample()
 
             action_idx = int(action_idx_t.item())
-            pair = tuple(int(x) for x in obs.candidate_pairs[action_idx])
+            pair = tuple(int(x) for x in observations[i].candidate_pairs[action_idx])
 
             action_indices.append(action_idx)
             action_pairs.append(pair)
             logprobs.append(float(dist.log_prob(action_idx_t).item()))
-            values.append(float(output.value.item()))
+            values.append(float(values_tensor[i].item()))
 
     return action_indices, action_pairs, logprobs, values
 
@@ -231,12 +231,9 @@ def _compute_bootstrap_values(
     observations: List[GraphObservation],
     device: torch.device,
 ) -> List[float]:
-    values: List[float] = []
     with torch.no_grad():
-        for obs in observations:
-            output = model.forward_observation(obs, device=device)
-            values.append(float(output.value.item()))
-    return values
+        _, values_tensor = model.forward_batched(observations, device)
+    return [float(v) for v in values_tensor]
 
 
 def _evaluate_policy(

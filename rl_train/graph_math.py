@@ -52,7 +52,7 @@ def laplacian(adj: np.ndarray) -> np.ndarray:
     return np.diag(deg) - adj_f
 
 
-def spectral_features(adj: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray]:
+def spectral_features(adj: np.ndarray) -> Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray]:
     L = laplacian(adj).astype(np.float64)
     evals, evecs = np.linalg.eigh(L)
 
@@ -60,20 +60,25 @@ def spectral_features(adj: np.ndarray) -> Tuple[float, float, np.ndarray, np.nda
     if n >= 3:
         lambda2 = float(evals[1])
         lambda3 = float(evals[2])
+        lambda4 = float(evals[3]) if n >= 4 else 0.0
         phi2 = evecs[:, 1]
         phi3 = evecs[:, 2]
-    elif n == 2:
-        lambda2 = float(evals[1])
-        lambda3 = float(evals[1])
-        phi2 = evecs[:, 1]
-        phi3 = evecs[:, 1]
+        phi4 = evecs[:, 3] if n >= 4 else evecs[:, 2]
+    # elif n == 2:
+    #     lambda2 = float(evals[1])
+    #     lambda3 = float(evals[1])
+    #     phi2 = evecs[:, 1]
+    #     phi3 = evecs[:, 1]
+    #     phi4 = np.zeros((n,), dtype=np.float64)
     else:
         lambda2 = 0.0
         lambda3 = 0.0
+        lambda4 = 0.0
         phi2 = np.zeros((n,), dtype=np.float64)
         phi3 = np.zeros((n,), dtype=np.float64)
+        phi4 = np.zeros((n,), dtype=np.float64)
 
-    return lambda2, lambda3, phi2.astype(np.float64), phi3.astype(np.float64)
+    return lambda2, lambda3, lambda4, phi2.astype(np.float64), phi3.astype(np.float64), phi4.astype(np.float64)
 
 
 def node_degrees(adj: np.ndarray) -> np.ndarray:
@@ -167,6 +172,15 @@ def fiedler_scores_for_pairs(phi2: np.ndarray, pairs: List[Tuple[int, int]]) -> 
     arr = np.asarray(pairs, dtype=np.int64)
     diff = phi2[arr[:, 0]] - phi2[arr[:, 1]]
     return diff * diff
+
+def multispectral_scores_for_all_pairs(phi2: np.ndarray, phi3: np.ndarray, phi4: np.ndarray, pairs: List[Tuple[int, int]]) -> np.ndarray:
+    if not pairs:
+        return np.zeros((0,), dtype=np.float64)
+    arr = np.asarray(pairs, dtype=np.int64)
+    diff2 = phi2[arr[:, 0]] - phi2[arr[:, 1]]
+    diff3 = phi3[arr[:, 0]] - phi3[arr[:, 1]]
+    diff4 = phi4[arr[:, 0]] - phi4[arr[:, 1]]
+    return (diff2 * diff2) + (diff3 * diff3) + (diff4 * diff4)
 
 
 def top_k_indices(scores: np.ndarray, k: int) -> np.ndarray:

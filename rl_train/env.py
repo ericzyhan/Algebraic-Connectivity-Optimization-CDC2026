@@ -107,8 +107,10 @@ class GraphEnv:
         self.episode_len: int = 0
         self.current_lambda2: float = 0.0
         self.current_lambda3: float = 0.0
+        self.current_lambda4: float = 0.0
         self.current_phi2: Optional[np.ndarray] = None
         self.current_phi3: Optional[np.ndarray] = None
+        self.current_phi4: Optional[np.ndarray] = None
         self._deg_cache: Optional[np.ndarray] = None
         self._a2_counts: Optional[np.ndarray] = None
         self._triangles_per_node: Optional[np.ndarray] = None
@@ -265,8 +267,8 @@ class GraphEnv:
             self.episode_len = 0
             if self.incremental_observation:
                 self._initialize_incremental_state()
-            lambda2, lambda3, phi2, phi3 = spectral_features(self.adj)
-            return self._build_observation(spectral_cache=(lambda2, lambda3, phi2, phi3))
+            lambda2, lambda3, lambda4, phi2, phi3, phi4 = spectral_features(self.adj)
+            return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4))
 
         self.adj = build_path_adjacency(self.n)
         self._episode_init_metadata = normalize_init_metadata(
@@ -278,8 +280,8 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        lambda2, lambda3, phi2, phi3 = spectral_features(self.adj)
-        return self._build_observation(spectral_cache=(lambda2, lambda3, phi2, phi3))
+        lambda2, lambda3, lambda4, phi2, phi3, phi4 = spectral_features(self.adj)
+        return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4))
 
     def reset_with_target(
         self,
@@ -324,13 +326,13 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        lambda2, lambda3, phi2, phi3 = spectral_features(self.adj)
-        return self._build_observation(spectral_cache=(lambda2, lambda3, phi2, phi3))
+        lambda2, lambda3, lambda4, phi2, phi3, phi4 = spectral_features(self.adj)
+        return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4))
 
     def _build_observation(
         self,
         *,
-        spectral_cache: Optional[Tuple[float, float, np.ndarray, np.ndarray]] = None,
+        spectral_cache: Optional[Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray]] = None,
     ) -> GraphObservation:
         if self.adj is None:
             raise RuntimeError("Environment not initialized")
@@ -341,17 +343,21 @@ class GraphEnv:
 
         use_spectral = (self.rl_variant == "full") or self.compute_spectral_each_step
         if spectral_cache is not None:
-            lambda2, lambda3, phi2, phi3 = spectral_cache
+            lambda2, lambda3, lambda4, phi2, phi3, phi4 = spectral_cache
             self.current_lambda2 = float(lambda2)
             self.current_lambda3 = float(lambda3)
+            self.current_lambda4 = float(lambda4)
             self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
             self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
+            self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
         elif use_spectral:
-            lambda2, lambda3, phi2, phi3 = spectral_features(self.adj)
+            lambda2, lambda3, lambda4, phi2, phi3, phi4 = spectral_features(self.adj)
             self.current_lambda2 = float(lambda2)
             self.current_lambda3 = float(lambda3)
+            self.current_lambda4 = float(lambda4)
             self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
             self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
+            self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
         else:
             lambda2 = float(self.current_lambda2)
             lambda3 = float(self.current_lambda3)
@@ -363,6 +369,11 @@ class GraphEnv:
             phi3 = (
                 np.asarray(self.current_phi3, dtype=np.float64)
                 if self.current_phi3 is not None
+                else np.zeros((n,), dtype=np.float64)
+            )
+            phi4 = (
+                np.asarray(self.current_phi4, dtype=np.float64)
+                if self.current_phi4 is not None
                 else np.zeros((n,), dtype=np.float64)
             )
 
@@ -391,6 +402,7 @@ class GraphEnv:
                 n=n,
                 phi2=phi2,
                 phi3=phi3,
+                phi4=phi4,
                 top_k=self.top_k,
                 dist_cap=self.dist_cap,
                 incremental_observation=self.incremental_observation,
@@ -479,7 +491,7 @@ class GraphEnv:
         reward = 0.0
 
         if use_spectral:
-            new_lambda2, new_lambda3, phi2, phi3 = spectral_features(self.adj)
+            new_lambda2, new_lambda3, new_lambda4,phi2, phi3, phi4 = spectral_features(self.adj)
             self.current_lambda2 = float(new_lambda2)
             self.current_lambda3 = float(new_lambda3)
             self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
@@ -488,7 +500,7 @@ class GraphEnv:
             if done:
                 reward += self.terminal_bonus_coef * (new_lambda2 / float(max(1, self.n)))
             obs = self._build_observation(
-                spectral_cache=(new_lambda2, new_lambda3, phi2, phi3)
+                spectral_cache=(new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4)
             )
             terminal_lambda2_norm = (new_lambda2 / float(max(1, self.n))) if done else None
         else:
@@ -499,6 +511,8 @@ class GraphEnv:
                 self.current_lambda3 = float(new_lambda3)
                 self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
                 self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
+                self.current_lambda4 = float(new_lambda4)
+                self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
                 terminal_lambda2_norm = new_lambda2 / float(max(1, self.n))
             else:
                 terminal_lambda2_norm = None
@@ -533,8 +547,10 @@ class GraphEnv:
             "episode_len": self.episode_len,
             "current_lambda2": self.current_lambda2,
             "current_lambda3": self.current_lambda3,
+            "current_lambda4": self.current_lambda4,
             "current_phi2": self.current_phi2,
             "current_phi3": self.current_phi3,
+            "current_phi4": self.current_phi4,
             "episode_init_metadata": dict(self._episode_init_metadata),
             "py_rng_state": self.py_rng.getstate(),
             "np_rng_state": self.np_rng.get_state(),
@@ -553,8 +569,10 @@ class GraphEnv:
         self.episode_len = int(state["episode_len"])
         self.current_lambda2 = float(state["current_lambda2"])
         self.current_lambda3 = float(state["current_lambda3"])
+        self.current_lambda4 = float(state.get("current_lambda4", 0.0))
         raw_phi2 = state.get("current_phi2")
         raw_phi3 = state.get("current_phi3")
+        raw_phi4 = state.get("current_phi4")
         self.current_phi2 = (
             np.asarray(raw_phi2, dtype=np.float64).copy()
             if raw_phi2 is not None
@@ -563,6 +581,11 @@ class GraphEnv:
         self.current_phi3 = (
             np.asarray(raw_phi3, dtype=np.float64).copy()
             if raw_phi3 is not None
+            else None
+        )
+        self.current_phi4 = (
+            np.asarray(raw_phi4, dtype=np.float64).copy()
+            if raw_phi4 is not None
             else None
         )
         raw_meta = state.get("episode_init_metadata")
