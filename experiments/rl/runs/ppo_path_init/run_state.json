@@ -1,0 +1,12 @@
+{
+  "algo": "ppo",
+  "best_eval_metric": 0.5837356328982358,
+  "elapsed_sec": 26131.969037771225,
+  "global_env_steps": 806000,
+  "init_mode": "path",
+  "last_checkpoint_path": "/home/dprtdowl/projects/Algebraic-Connectivity-Optimization-CDC2026/experiments/rl/runs/ppo_path_init/checkpoints/step_804000.pt",
+  "phase": "phase_c_16_64",
+  "rl_variant": "full",
+  "selector_update_idx": 0,
+  "update_idx": 393
+}
