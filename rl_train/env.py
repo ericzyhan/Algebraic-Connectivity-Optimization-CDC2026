@@ -26,6 +26,7 @@ from .graph_math import (
     m_target_from_rho,
     normalized_density,
     spectral_features,
+    total_effective_resistance,
 )
 
 InitAdjBuilder = Callable[[int, float, int], Tuple[np.ndarray, Dict[str, Any]]]
@@ -108,6 +109,8 @@ class GraphEnv:
         self.current_lambda2: float = 0.0
         self.current_lambda3: float = 0.0
         self.current_lambda4: float = 0.0
+        self.current_rg: float = 0.0
+        self.current_multiplicity: int = 1
         self.current_phi2: Optional[np.ndarray] = None
         self.current_phi3: Optional[np.ndarray] = None
         self.current_phi4: Optional[np.ndarray] = None
@@ -267,7 +270,9 @@ class GraphEnv:
             self.episode_len = 0
             if self.incremental_observation:
                 self._initialize_incremental_state()
-            lambda2, lambda3, lambda4, phi2, phi3, phi4 = spectral_features(self.adj)
+            lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult = spectral_features(self.adj)
+            self.current_rg = float(rg)
+            self.current_multiplicity = int(mult)
             return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4))
 
         self.adj = build_path_adjacency(self.n)
@@ -280,7 +285,9 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        lambda2, lambda3, lambda4, phi2, phi3, phi4 = spectral_features(self.adj)
+        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult = spectral_features(self.adj)
+        self.current_rg = float(rg)
+        self.current_multiplicity = int(mult)
         return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4))
 
     def reset_with_target(
@@ -326,7 +333,9 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        lambda2, lambda3, lambda4, phi2, phi3, phi4 = spectral_features(self.adj)
+        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult = spectral_features(self.adj)
+        self.current_rg = float(rg)
+        self.current_multiplicity = int(mult)
         return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4))
 
     def _build_observation(
@@ -351,10 +360,12 @@ class GraphEnv:
             self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
             self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
         elif use_spectral:
-            lambda2, lambda3, lambda4, phi2, phi3, phi4 = spectral_features(self.adj)
+            lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult = spectral_features(self.adj)
             self.current_lambda2 = float(lambda2)
             self.current_lambda3 = float(lambda3)
             self.current_lambda4 = float(lambda4)
+            self.current_rg = float(rg)
+            self.current_multiplicity = int(mult)
             self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
             self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
             self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
@@ -395,6 +406,7 @@ class GraphEnv:
                 rho_current=rho_current,
                 lambda2=lambda2,
                 lambda3=lambda3,
+                lambda4=lambda4,
             )
             candidate_pairs, pair_features = build_candidate_features_full(
                 adj=self.adj,
@@ -403,6 +415,9 @@ class GraphEnv:
                 phi2=phi2,
                 phi3=phi3,
                 phi4=phi4,
+                lambda2=lambda2,
+                lambda3=lambda3,
+                lambda4=lambda4,
                 top_k=self.top_k,
                 dist_cap=self.dist_cap,
                 incremental_observation=self.incremental_observation,
@@ -491,13 +506,26 @@ class GraphEnv:
         reward = 0.0
 
         if use_spectral:
-            new_lambda2, new_lambda3, new_lambda4,phi2, phi3, phi4 = spectral_features(self.adj)
+            old_rg = float(self.current_rg)
+            new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_rg, new_mult = spectral_features(self.adj)
             self.current_lambda2 = float(new_lambda2)
             self.current_lambda3 = float(new_lambda3)
+            self.current_lambda4 = float(new_lambda4)
+            self.current_rg = float(new_rg)
+            self.current_multiplicity = int(new_mult)
             self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
             self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
-            reward = (new_lambda2 - old_lambda2) / float(max(1, self.n))
+            self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
+
+            # ER-based reward: relative reduction in total effective resistance
+            # R_G = n * Σ 1/λ_i  →  decreasing R_G improves full spectrum
+            reward_er = (old_rg - new_rg) / max(old_rg, 1e-10)
+            reward_l2 = (new_lambda2 - old_lambda2) / float(max(1, self.n))
+            # Default: pure ER reward. Config weights can blend with Δλ₂.
+            reward = float(reward_er)
+
             if done:
+                # Terminal bonus based on final λ₂ (keeps original logic)
                 reward += self.terminal_bonus_coef * (new_lambda2 / float(max(1, self.n)))
             obs = self._build_observation(
                 spectral_cache=(new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4)
@@ -506,12 +534,14 @@ class GraphEnv:
         else:
             # Fast inference path for lite_v2: avoid per-step spectral decomposition.
             if done:
-                new_lambda2, new_lambda3, phi2, phi3 = spectral_features(self.adj)
+                new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_rg, new_mult = spectral_features(self.adj)
                 self.current_lambda2 = float(new_lambda2)
                 self.current_lambda3 = float(new_lambda3)
+                self.current_lambda4 = float(new_lambda4)
+                self.current_rg = float(new_rg)
+                self.current_multiplicity = int(new_mult)
                 self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
                 self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
-                self.current_lambda4 = float(new_lambda4)
                 self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
                 terminal_lambda2_norm = new_lambda2 / float(max(1, self.n))
             else:
@@ -548,6 +578,8 @@ class GraphEnv:
             "current_lambda2": self.current_lambda2,
             "current_lambda3": self.current_lambda3,
             "current_lambda4": self.current_lambda4,
+            "current_rg": self.current_rg,
+            "current_multiplicity": self.current_multiplicity,
             "current_phi2": self.current_phi2,
             "current_phi3": self.current_phi3,
             "current_phi4": self.current_phi4,
@@ -570,6 +602,8 @@ class GraphEnv:
         self.current_lambda2 = float(state["current_lambda2"])
         self.current_lambda3 = float(state["current_lambda3"])
         self.current_lambda4 = float(state.get("current_lambda4", 0.0))
+        self.current_rg = float(state.get("current_rg", 0.0))
+        self.current_multiplicity = int(state.get("current_multiplicity", 1))
         raw_phi2 = state.get("current_phi2")
         raw_phi3 = state.get("current_phi3")
         raw_phi4 = state.get("current_phi4")

@@ -24,6 +24,7 @@ from .selector import (
     SelectorBuffer,
     SelectorTrainingSample,
     adaptive_top_k,
+    er_teacher_scores_for_pairs,
     normalized_spectral_scores_for_pairs,
     selector_update,
     slice_observation,
@@ -152,8 +153,6 @@ def _select_actions_with_lite_selector(
 
     w_teacher_l2 = float(cfg.lite_v2.teacher_weight_lambda2)
     w_teacher_l3 = float(cfg.lite_v2.teacher_weight_lambda3)
-    w_reward_l2 = float(cfg.lite_v2.reward_weight_lambda2)
-    w_reward_l3 = float(cfg.lite_v2.reward_weight_lambda3)
     reward_coef = float(cfg.lite_v2.reward_shaping_coef)
 
     with torch.no_grad():
@@ -164,6 +163,7 @@ def _select_actions_with_lite_selector(
 
             phi2 = env.current_phi2
             phi3 = env.current_phi3
+            phi4 = env.current_phi4
             if phi2 is None or phi3 is None:
                 raise RuntimeError("Missing spectral vectors for lite selector teacher.")
 
@@ -180,12 +180,30 @@ def _select_actions_with_lite_selector(
             selector_scores = selector_logits.detach().cpu().numpy()
             selected_idx = stable_topk_indices(selector_scores, k)
 
-            s2n, s3n = normalized_spectral_scores_for_pairs(
-                candidate_pairs=obs.candidate_pairs,
-                phi2=phi2,
-                phi3=phi3,
-            )
-            teacher_scores = (w_teacher_l2 * s2n) + (w_teacher_l3 * s3n)
+            # Teacher scores — ER-weighted or traditional spectral gap
+            use_er = bool(getattr(cfg.lite_v2, 'use_er_teacher', False))
+            lambda2 = env.current_lambda2 if hasattr(env, 'current_lambda2') else 0.0
+            lambda3 = env.current_lambda3 if hasattr(env, 'current_lambda3') else 0.0
+            lambda4 = env.current_lambda4 if hasattr(env, 'current_lambda4') else 0.0
+
+            if use_er:
+                teacher_scores = er_teacher_scores_for_pairs(
+                    candidate_pairs=obs.candidate_pairs,
+                    phi2=phi2,
+                    phi3=phi3,
+                    phi4=phi4,
+                    lambda2=lambda2,
+                    lambda3=lambda3,
+                    lambda4=lambda4,
+                )
+            else:
+                s2n, s3n = normalized_spectral_scores_for_pairs(
+                    candidate_pairs=obs.candidate_pairs,
+                    phi2=phi2,
+                    phi3=phi3,
+                )
+                teacher_scores = (float(w_teacher_l2) * s2n) + (float(w_teacher_l3) * s3n)
+
             teacher_top_idx = stable_topk_indices(teacher_scores, k)
             teacher_mask = np.zeros((num_candidates,), dtype=np.float32)
             teacher_mask[teacher_top_idx] = 1.0
@@ -206,8 +224,8 @@ def _select_actions_with_lite_selector(
             action_pair = tuple(int(x) for x in policy_obs.candidate_pairs[action_idx])
             global_candidate_idx = int(selected_idx[action_idx])
 
-            reward_teacher = (w_reward_l2 * s2n) + (w_reward_l3 * s3n)
-            shaped_reward = reward_coef * float(reward_teacher[global_candidate_idx])
+            # Shaped reward from teacher score
+            shaped_reward = reward_coef * float(teacher_scores[global_candidate_idx])
 
             policy_observations.append(policy_obs)
             action_indices.append(action_idx)

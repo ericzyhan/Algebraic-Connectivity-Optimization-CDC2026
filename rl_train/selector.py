@@ -69,6 +69,37 @@ def teacher_scores_for_pairs(
     return (float(w2) * s2n) + (float(w3) * s3n)
 
 
+def er_teacher_scores_for_pairs(
+    candidate_pairs: np.ndarray,
+    phi2: np.ndarray,
+    phi3: np.ndarray,
+    phi4: np.ndarray,
+    lambda2: float,
+    lambda3: float,
+    lambda4: float,
+) -> np.ndarray:
+    """Score candidates by their effective-resistance-weighted spectral gap.
+
+    score = Σ_{k=2}^4 (Δφ_k)² / λ_k   (ER-weighted, then min-max normalized).
+
+    This weights each eigenvector contribution by 1/λ_k, so low eigenvalues
+    (where connectivity is weakest) get more influence — a direct reflection
+    of the total effective resistance R_G = n · Σ 1/λ_k.
+    """
+    i_idx = candidate_pairs[:, 0]
+    j_idx = candidate_pairs[:, 1]
+    safe_l2 = max(float(abs(lambda2)), 1e-10)
+    safe_l3 = max(float(abs(lambda3)), 1e-10)
+    safe_l4 = max(float(abs(lambda4)), 1e-10)
+
+    raw = (
+        (phi2[i_idx] - phi2[j_idx]) ** 2 / safe_l2
+        + (phi3[i_idx] - phi3[j_idx]) ** 2 / safe_l3
+        + (phi4[i_idx] - phi4[j_idx]) ** 2 / safe_l4
+    )
+    return minmax_normalize(raw.astype(np.float64, copy=False))
+
+
 def slice_observation(obs: GraphObservation, candidate_indices: np.ndarray) -> GraphObservation:
     return GraphObservation(
         node_features=obs.node_features,

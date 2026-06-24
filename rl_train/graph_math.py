@@ -52,7 +52,27 @@ def laplacian(adj: np.ndarray) -> np.ndarray:
     return np.diag(deg) - adj_f
 
 
-def spectral_features(adj: np.ndarray) -> Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray]:
+def spectral_features(
+    adj: np.ndarray,
+    *,
+    eps_abs: float = 1e-12,
+    eps_rel: float = 1e-10,
+) -> Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, float, int]:
+    """Compute spectral features, total effective resistance, and λ₂ multiplicity.
+
+    Returns
+    -------
+    lambda2 : float
+    lambda3 : float
+    lambda4 : float
+    phi2 : ndarray (n,)
+    phi3 : ndarray (n,)
+    phi4 : ndarray (n,)
+    rg : float
+        Total effective (graph) resistance R_G = n * Σ 1/λ_i for i=2..n.
+    multiplicity : int
+        Number of eigenvalues clustered around λ₂ (within tolerance), excluding λ₁=0.
+    """
     L = laplacian(adj).astype(np.float64)
     evals, evecs = np.linalg.eigh(L)
 
@@ -64,12 +84,6 @@ def spectral_features(adj: np.ndarray) -> Tuple[float, float, float, np.ndarray,
         phi2 = evecs[:, 1]
         phi3 = evecs[:, 2]
         phi4 = evecs[:, 3] if n >= 4 else evecs[:, 2]
-    # elif n == 2:
-    #     lambda2 = float(evals[1])
-    #     lambda3 = float(evals[1])
-    #     phi2 = evecs[:, 1]
-    #     phi3 = evecs[:, 1]
-    #     phi4 = np.zeros((n,), dtype=np.float64)
     else:
         lambda2 = 0.0
         lambda3 = 0.0
@@ -78,7 +92,17 @@ def spectral_features(adj: np.ndarray) -> Tuple[float, float, float, np.ndarray,
         phi3 = np.zeros((n,), dtype=np.float64)
         phi4 = np.zeros((n,), dtype=np.float64)
 
-    return lambda2, lambda3, lambda4, phi2.astype(np.float64), phi3.astype(np.float64), phi4.astype(np.float64)
+    # Total effective resistance: R_G = n * Σ_{i=2}^n 1/λ_i
+    safe_evals = np.maximum(evals[1:], 1e-10)
+    rg = float(n) * float(np.sum(1.0 / safe_evals))
+
+    # Multiplicity of λ₂: count eigenvalues within tolerance of λ₂ (exclude λ₁=0)
+    tol = max(eps_abs, eps_rel * max(1.0, abs(lambda2)))
+    mult_mask = (np.abs(evals - lambda2) <= tol)
+    mult_mask[0] = False
+    multiplicity = int(np.sum(mult_mask))
+
+    return lambda2, lambda3, lambda4, phi2.astype(np.float64), phi3.astype(np.float64), phi4.astype(np.float64), rg, multiplicity
 
 
 def node_degrees(adj: np.ndarray) -> np.ndarray:
@@ -181,6 +205,63 @@ def multispectral_scores_for_all_pairs(phi2: np.ndarray, phi3: np.ndarray, phi4:
     diff3 = phi3[arr[:, 0]] - phi3[arr[:, 1]]
     diff4 = phi4[arr[:, 0]] - phi4[arr[:, 1]]
     return (diff2 * diff2) + (diff3 * diff3) + (diff4 * diff4)
+
+
+def total_effective_resistance(evals: np.ndarray, n: int, eps: float = 1e-10) -> float:
+    """Compute R_G = n * Σ_{i=2}^n 1/λ_i from the full eigenvalue array."""
+    if n < 2:
+        return 0.0
+    safe = np.maximum(evals[1:], eps)
+    return float(n) * float(np.sum(1.0 / safe))
+
+
+def lambda2_eigenspace_scores(
+    evals: np.ndarray,
+    evecs: np.ndarray,
+    pairs: np.ndarray,
+    *,
+    eps_abs: float = 1e-12,
+    eps_rel: float = 1e-10,
+) -> np.ndarray:
+    """Score each candidate pair by effective-resistance-weighted λ₂ eigenspace gap.
+
+    Detects the multiplicity d of λ₂, extracts the d eigenvectors spanning the
+    λ₂ eigenspace, and computes:
+
+        score(u,v) = (1/λ₂) * Σ_{k=1}^{d} (φ_{k+1}[u] - φ_{k+1}[v])²
+
+    where φ₂,...,φ_{d+1} are the eigenvectors in the λ₂ eigenspace.
+    Dividing by λ₂ gives the ER-weighted spectral gap.
+    """
+    if pairs.size == 0:
+        return np.zeros((0,), dtype=np.float64)
+    pairs = np.asarray(pairs, dtype=np.int64)
+    n = int(evals.shape[0])
+    if n < 2:
+        return np.zeros((pairs.shape[0],), dtype=np.float64)
+
+    lambda2 = float(evals[1])
+    tol = max(eps_abs, eps_rel * max(1.0, abs(lambda2)))
+    mult_mask = (np.abs(evals - lambda2) <= tol)
+    mult_mask[0] = False
+    d = int(np.sum(mult_mask))
+
+    if d <= 0:
+        # Fallback: just use φ₂ with zero weight
+        diff = evecs[pairs[:, 0], 1] - evecs[pairs[:, 1], 1]
+        return diff * diff
+
+    # Extract d eigenvectors in the λ₂ eigenspace
+    idx = np.flatnonzero(mult_mask)  # shape (d,), e.g. [1] or [1,2] or [1,2,3]
+    phi_stack = evecs[:, idx].astype(np.float64)  # (n, d)
+
+    # Compute sum of squared differences across the d eigenvectors
+    diff = phi_stack[pairs[:, 0], :] - phi_stack[pairs[:, 1], :]  # (p, d)
+    scores = np.sum(diff * diff, axis=1)  # (p,)
+
+    # Normalize by λ₂ (all d eigenvalues ≈ λ₂ within tolerance)
+    safe_l2 = max(float(abs(lambda2)), 1e-10)
+    return scores / safe_l2
 
 
 def top_k_indices(scores: np.ndarray, k: int) -> np.ndarray:

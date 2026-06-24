@@ -126,6 +126,7 @@ class LiteV2Config:
     reward_weight_lambda2: float = 0.7
     reward_weight_lambda3: float = 0.3
     fast_inference: bool = True
+    use_er_teacher: bool = False  # Use ER-weighted teacher (True) or weighted spectral-gap teacher (False)
 
 
 @dataclass
