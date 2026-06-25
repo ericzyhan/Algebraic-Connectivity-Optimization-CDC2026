@@ -404,7 +404,7 @@ def _build_checkpoint_payload(
 def run_training(
     cfg: Config,
     resume_from: Optional[str] = None,
-    device: str = "cpu",
+    device: str = "auto",
     quiet: bool = False,
 ) -> Dict:
     _prepare_dirs(cfg)
@@ -418,6 +418,13 @@ def run_training(
         raise ValueError(
             "checkpoint.every_env_steps must be divisible by num_envs"
         )
+
+    # Auto-detect device: use CUDA if available, otherwise CPU
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    elif device.startswith("cuda") and not torch.cuda.is_available():
+        print(f"WARNING: device='{device}' requested but CUDA not available; falling back to CPU")
+        device = "cpu"
 
     device_obj = torch.device(device)
     scheduler = CurriculumScheduler(cfg.curriculum)
@@ -934,8 +941,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         type=str,
-        default="cpu",
-        help="Training device, e.g. cpu or cuda",
+        default="auto",
+        help="Training device: cpu, cuda, or auto (auto-detect)",
     )
     parser.add_argument(
         "--init-mode",
