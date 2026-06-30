@@ -447,6 +447,8 @@ def run_training(
         compute_spectral_each_step=True,
         init_mode=init_mode,
         initial_adj_builder=initial_adj_builder,
+        reward_alpha=cfg.env.reward_alpha,
+        reward_eta=cfg.env.reward_eta,
     )
 
     model = _build_model(cfg, device_obj)

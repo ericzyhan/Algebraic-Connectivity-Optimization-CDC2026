@@ -57,7 +57,7 @@ def spectral_features(
     *,
     eps_abs: float = 1e-12,
     eps_rel: float = 1e-10,
-) -> Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, float, int]:
+) -> Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, float, int, np.ndarray]:
     """Compute spectral features, total effective resistance, and λ₂ multiplicity.
 
     Returns
@@ -72,6 +72,8 @@ def spectral_features(
         Total effective (graph) resistance R_G = n * Σ 1/λ_i for i=2..n.
     multiplicity : int
         Number of eigenvalues clustered around λ₂ (within tolerance), excluding λ₁=0.
+    evecs : ndarray (n, n)
+        Full eigenvector matrix from np.linalg.eigh (columns are eigenvectors).
     """
     L = laplacian(adj).astype(np.float64)
     evals, evecs = np.linalg.eigh(L)
@@ -102,7 +104,7 @@ def spectral_features(
     mult_mask[0] = False
     multiplicity = int(np.sum(mult_mask))
 
-    return lambda2, lambda3, lambda4, phi2.astype(np.float64), phi3.astype(np.float64), phi4.astype(np.float64), rg, multiplicity
+    return lambda2, lambda3, lambda4, phi2.astype(np.float64), phi3.astype(np.float64), phi4.astype(np.float64), rg, multiplicity, evecs.astype(np.float64)
 
 
 def node_degrees(adj: np.ndarray) -> np.ndarray:

@@ -7,8 +7,6 @@ import numpy as np
 from ..graph_math import (
     clustering_coefficients,
     edge_index_from_adj,
-    fiedler_scores_for_pairs,
-    multispectral_scores_for_all_pairs,
     node_degrees,
     non_edges,
     top_k_indices,
@@ -88,6 +86,25 @@ def build_global_features(
     )
 
 
+def _lambda2_eigenspace_gap(
+    evecs: np.ndarray,
+    multiplicity: int,
+    i_idx: np.ndarray,
+    j_idx: np.ndarray,
+) -> np.ndarray:
+    """Compute H(i,j) = Σ_{k=2}^{d} (evecs[i,k] - evecs[j,k])²
+
+    where d = multiplicity of λ₂ (the algebraic connectivity).  Sums squared
+    eigenvector differences across all eigenvectors in the λ₂ eigenspace.
+    For d=1 this reduces to the standard Fiedler gap.
+    """
+    d = int(max(1, multiplicity))
+    # d eigenvectors starting at column index 1 (skip λ₁=0 eigenvector)
+    phi_stack = evecs[:, 1 : 1 + d].astype(np.float64)  # (n, d)
+    diff = phi_stack[i_idx, :] - phi_stack[j_idx, :]  # (p, d)
+    return np.sum(diff * diff, axis=1)  # (p,)
+
+
 def build_candidate_features(
     *,
     adj: np.ndarray,
@@ -96,9 +113,8 @@ def build_candidate_features(
     phi2: np.ndarray,
     phi3: np.ndarray,
     phi4: np.ndarray,
-    lambda2: float,
-    lambda3: float,
-    lambda4: float,
+    evecs: np.ndarray,
+    multiplicity: int,
     top_k: int,
     dist_cap: int,
     incremental_observation: bool,
@@ -121,18 +137,9 @@ def build_candidate_features(
                 np.zeros((0, 7), dtype=np.float32),
             )
 
-        # ER-weighted spectral gap: score = Σ (Δφ_k)² / λ_k
-        # Divides each eigen-gap by its eigenvalue, giving more weight to
-        # low-eigenvalue modes where connectivity is weakest.
-        safe_l2 = max(float(abs(lambda2)), 1e-10)
-        safe_l3 = max(float(abs(lambda3)), 1e-10)
-        safe_l4 = max(float(abs(lambda4)), 1e-10)
-        all_scores = (
-            (phi2[pair_i] - phi2[pair_j]) ** 2 / safe_l2
-            + (phi3[pair_i] - phi3[pair_j]) ** 2 / safe_l3
-            + (phi4[pair_i] - phi4[pair_j]) ** 2 / safe_l4
-        )
-        selected_local = top_k_indices(all_scores[nonedge_pair_idx], top_k)
+        # λ₂ eigenspace gap: H(i,j) = Σ_{k=2}^{d} (φ_k(i) - φ_k(j))²
+        all_h = _lambda2_eigenspace_gap(evecs, multiplicity, pair_i, pair_j)
+        selected_local = top_k_indices(all_h[nonedge_pair_idx], top_k)
         selected_pair_idx = nonedge_pair_idx[selected_local]
         candidate_pairs = np.stack(
             [pair_i[selected_pair_idx], pair_j[selected_pair_idx]],
@@ -145,32 +152,22 @@ def build_candidate_features(
                 np.zeros((0, 2), dtype=np.int64),
                 np.zeros((0, 7), dtype=np.float32),
             )
-        f_scores = multispectral_scores_for_all_pairs(phi2, phi3, phi4, all_non_edges)
-        # Convert to ER-weighted: divide raw multispectral score by λ₂ as an
-        # approximate normalizer (the λ₂ eigenspace dominates).
-        safe_l2 = max(float(abs(lambda2)), 1e-10)
-        f_scores_er = f_scores / safe_l2
-        selected = top_k_indices(f_scores_er, top_k)
+        # λ₂ eigenspace gap for all non-edges
+        arr = np.asarray(all_non_edges, dtype=np.int64)
+        i_all = arr[:, 0]
+        j_all = arr[:, 1]
+        all_h = _lambda2_eigenspace_gap(evecs, multiplicity, i_all, j_all)
+        selected = top_k_indices(all_h, top_k)
         candidate_pairs_list = [all_non_edges[idx] for idx in selected]
         candidate_pairs = np.array(candidate_pairs_list, dtype=np.int64)
 
     i_idx = candidate_pairs[:, 0]
     j_idx = candidate_pairs[:, 1]
 
-    fiedler_score = (phi2[i_idx] - phi2[j_idx]) ** 2
+    # λ₂ eigenspace gap as a pair feature (replaces plain Fiedler gap)
+    h_score = _lambda2_eigenspace_gap(evecs, multiplicity, i_idx, j_idx)
     phi3_gap = np.abs(phi3[i_idx] - phi3[j_idx])
     phi4_gap = np.abs(phi4[i_idx] - phi4[j_idx])
-
-    # ER-weighted composite score for this candidate as a pair feature
-    safe_l2 = max(float(abs(lambda2)), 1e-10)
-    safe_l3 = max(float(abs(lambda3)), 1e-10)
-    safe_l4 = max(float(abs(lambda4)), 1e-10)
-    er_raw = (
-        fiedler_score / safe_l2
-        + (phi3_gap * phi3_gap) / safe_l3
-        + (phi4_gap * phi4_gap) / safe_l4
-    )
-    er_score_norm = er_raw / max(float(np.max(er_raw)), 1e-10)
 
     common_counts = np.sum(
         np.logical_and(adj[i_idx] > 0, adj[j_idx] > 0),
@@ -194,8 +191,10 @@ def build_candidate_features(
         all_dist = truncated_all_pairs_shortest_path(adj, dist_cap)
         dist_norm = all_dist[i_idx, j_idx].astype(np.float64) / float(max(1, dist_cap))
 
+    h_norm = h_score / max(float(np.max(h_score)), 1e-10)
+
     pair_features = np.stack(
-        [fiedler_score, phi3_gap, phi4_gap, cn_norm, jac, dist_norm, er_score_norm],
+        [h_score, phi3_gap, phi4_gap, cn_norm, jac, dist_norm, h_norm],
         axis=1,
     ).astype(np.float32, copy=False)
     return candidate_pairs, pair_features

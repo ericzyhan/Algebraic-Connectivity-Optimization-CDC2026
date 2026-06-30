@@ -21,6 +21,8 @@ env:
   top_k: 128
   dist_cap: 4
   terminal_bonus_coef: 0.2
+  reward_alpha: 0.5
+  reward_eta: 0.0        # 0 = auto-calibrated per n; set >0 to override
 
 model:
   gat_hidden_dim: 64

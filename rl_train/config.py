@@ -27,6 +27,8 @@ class EnvConfig:
     top_k: int = 128
     dist_cap: int = 4
     terminal_bonus_coef: float = 0.2
+    reward_alpha: float = 0.5
+    reward_eta: float = 0.0  # 0 = auto (calibrated per n); set >0 to override
 
 
 @dataclass

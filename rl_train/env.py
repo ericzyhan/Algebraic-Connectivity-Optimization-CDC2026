@@ -84,12 +84,16 @@ class GraphEnv:
         rl_variant: str = "full",
         compute_spectral_each_step: bool = True,
         incremental_observation: bool = True,
+        reward_alpha: float = 0.5,
+        reward_eta: float = 1.0,
     ):
         self.env_id = env_id
         self.scheduler = scheduler
         self.top_k = top_k
         self.dist_cap = dist_cap
         self.terminal_bonus_coef = terminal_bonus_coef
+        self.reward_alpha = float(reward_alpha)
+        self.reward_eta = float(reward_eta)
         self.rl_variant = str(rl_variant)
         self.compute_spectral_each_step = bool(compute_spectral_each_step)
         self.incremental_observation = bool(incremental_observation)
@@ -114,6 +118,7 @@ class GraphEnv:
         self.current_phi2: Optional[np.ndarray] = None
         self.current_phi3: Optional[np.ndarray] = None
         self.current_phi4: Optional[np.ndarray] = None
+        self.current_evecs: Optional[np.ndarray] = None
         self._deg_cache: Optional[np.ndarray] = None
         self._a2_counts: Optional[np.ndarray] = None
         self._triangles_per_node: Optional[np.ndarray] = None
@@ -124,6 +129,32 @@ class GraphEnv:
         self._pair_to_index: Optional[np.ndarray] = None
         self._eye_mask: Optional[np.ndarray] = None
         self._episode_init_metadata: Dict[str, Any] = default_path_init_metadata(0)
+
+    # Empirical η(n) calibration from estimate_eta.py
+    _ETA_TABLE_NS = np.array([8, 12, 16, 24, 32, 48, 64], dtype=np.float64)
+    _ETA_TABLE_VALS = np.array(
+        [0.803010, 0.368719, 0.104369, 0.019933, 0.006965, 0.001646, 0.000596],
+        dtype=np.float64,
+    )
+
+    def _effective_eta(self) -> float:
+        """Return η for the current graph size n.
+
+        If reward_eta > 0 it is used directly (config override).
+        Otherwise η is obtained by linear interpolation of the
+        empirically calibrated table (see estimate_eta.py).
+        """
+        if float(self.reward_eta) > 0.0:
+            return float(self.reward_eta)
+        n_f = float(max(2, self.n))
+        # Clip to the table range and interpolate
+        ns = type(self)._ETA_TABLE_NS
+        vs = type(self)._ETA_TABLE_VALS
+        if n_f <= float(ns[0]):
+            return float(vs[0])
+        if n_f >= float(ns[-1]):
+            return float(vs[-1])
+        return float(np.interp(n_f, ns, vs))
 
     def _compute_all_pairs_shortest_path(self, adj: np.ndarray) -> np.ndarray:
         n = adj.shape[0]
@@ -270,10 +301,11 @@ class GraphEnv:
             self.episode_len = 0
             if self.incremental_observation:
                 self._initialize_incremental_state()
-            lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult = spectral_features(self.adj)
+            lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_features(self.adj)
             self.current_rg = float(rg)
             self.current_multiplicity = int(mult)
-            return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4))
+            self.current_evecs = evecs.copy()
+            return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
 
         self.adj = build_path_adjacency(self.n)
         self._episode_init_metadata = normalize_init_metadata(
@@ -285,10 +317,11 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult = spectral_features(self.adj)
+        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_features(self.adj)
         self.current_rg = float(rg)
         self.current_multiplicity = int(mult)
-        return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4))
+        self.current_evecs = evecs.copy()
+        return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
 
     def reset_with_target(
         self,
@@ -333,15 +366,16 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult = spectral_features(self.adj)
+        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_features(self.adj)
         self.current_rg = float(rg)
         self.current_multiplicity = int(mult)
-        return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4))
+        self.current_evecs = evecs.copy()
+        return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
 
     def _build_observation(
         self,
         *,
-        spectral_cache: Optional[Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray]] = None,
+        spectral_cache: Optional[Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = None,
     ) -> GraphObservation:
         if self.adj is None:
             raise RuntimeError("Environment not initialized")
@@ -352,15 +386,16 @@ class GraphEnv:
 
         use_spectral = (self.rl_variant == "full") or self.compute_spectral_each_step
         if spectral_cache is not None:
-            lambda2, lambda3, lambda4, phi2, phi3, phi4 = spectral_cache
+            lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs = spectral_cache
             self.current_lambda2 = float(lambda2)
             self.current_lambda3 = float(lambda3)
             self.current_lambda4 = float(lambda4)
             self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
             self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
             self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
+            self.current_evecs = evecs.copy()
         elif use_spectral:
-            lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult = spectral_features(self.adj)
+            lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_features(self.adj)
             self.current_lambda2 = float(lambda2)
             self.current_lambda3 = float(lambda3)
             self.current_lambda4 = float(lambda4)
@@ -369,6 +404,7 @@ class GraphEnv:
             self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
             self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
             self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
+            self.current_evecs = evecs.copy()
         else:
             lambda2 = float(self.current_lambda2)
             lambda3 = float(self.current_lambda3)
@@ -408,6 +444,8 @@ class GraphEnv:
                 lambda3=lambda3,
                 lambda4=lambda4,
             )
+            if self.current_evecs is None:
+                raise RuntimeError("Eigenvectors not available for full variant observation")
             candidate_pairs, pair_features = build_candidate_features_full(
                 adj=self.adj,
                 deg=deg,
@@ -415,9 +453,8 @@ class GraphEnv:
                 phi2=phi2,
                 phi3=phi3,
                 phi4=phi4,
-                lambda2=lambda2,
-                lambda3=lambda3,
-                lambda4=lambda4,
+                evecs=self.current_evecs,
+                multiplicity=self.current_multiplicity,
                 top_k=self.top_k,
                 dist_cap=self.dist_cap,
                 incremental_observation=self.incremental_observation,
@@ -507,39 +544,48 @@ class GraphEnv:
 
         if use_spectral:
             old_rg = float(self.current_rg)
-            new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_rg, new_mult = spectral_features(self.adj)
+            new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_rg, new_mult, new_evecs = spectral_features(self.adj)
             self.current_lambda2 = float(new_lambda2)
             self.current_lambda3 = float(new_lambda3)
             self.current_lambda4 = float(new_lambda4)
             self.current_rg = float(new_rg)
             self.current_multiplicity = int(new_mult)
+            self.current_evecs = new_evecs.copy()
             self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
             self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
             self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
 
-            # ER-based reward: relative reduction in total effective resistance
-            # R_G = n * Σ 1/λ_i  →  decreasing R_G improves full spectrum
-            reward_er = (old_rg - new_rg) / max(old_rg, 1e-10)
-            reward_l2 = (new_lambda2 - old_lambda2) / float(max(1, self.n))
-            # Default: pure ER reward. Config weights can blend with Δλ₂.
-            reward = float(reward_er)
+            # Blended reward: r_t = α·Δλ₂/n + (1-α)·η·ΔR_G/n² + β·𝟙_term·λ₂/n
+            # ΔR_G is positive when resistance decreases (old - new).
+            nf = float(max(1, self.n))
+            delta_l2 = float(new_lambda2 - old_lambda2)
+            delta_rg = float(old_rg - new_rg)
+
+            alpha = float(self.reward_alpha)
+            eta = self._effective_eta()
+
+            reward_l2 = delta_l2 / nf
+            reward_rg = eta * delta_rg / (nf * nf)
+
+            reward = alpha * reward_l2 + (1.0 - alpha) * reward_rg
 
             if done:
                 # Terminal bonus based on final λ₂ (keeps original logic)
-                reward += self.terminal_bonus_coef * (new_lambda2 / float(max(1, self.n)))
+                reward += self.terminal_bonus_coef * (new_lambda2 / nf)
             obs = self._build_observation(
-                spectral_cache=(new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4)
+                spectral_cache=(new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_evecs)
             )
-            terminal_lambda2_norm = (new_lambda2 / float(max(1, self.n))) if done else None
+            terminal_lambda2_norm = (new_lambda2 / nf) if done else None
         else:
             # Fast inference path for lite_v2: avoid per-step spectral decomposition.
             if done:
-                new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_rg, new_mult = spectral_features(self.adj)
+                new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_rg, new_mult, new_evecs = spectral_features(self.adj)
                 self.current_lambda2 = float(new_lambda2)
                 self.current_lambda3 = float(new_lambda3)
                 self.current_lambda4 = float(new_lambda4)
                 self.current_rg = float(new_rg)
                 self.current_multiplicity = int(new_mult)
+                self.current_evecs = new_evecs.copy()
                 self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
                 self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
                 self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
@@ -583,6 +629,7 @@ class GraphEnv:
             "current_phi2": self.current_phi2,
             "current_phi3": self.current_phi3,
             "current_phi4": self.current_phi4,
+            "current_evecs": self.current_evecs,
             "episode_init_metadata": dict(self._episode_init_metadata),
             "py_rng_state": self.py_rng.getstate(),
             "np_rng_state": self.np_rng.get_state(),
@@ -607,6 +654,7 @@ class GraphEnv:
         raw_phi2 = state.get("current_phi2")
         raw_phi3 = state.get("current_phi3")
         raw_phi4 = state.get("current_phi4")
+        raw_evecs = state.get("current_evecs")
         self.current_phi2 = (
             np.asarray(raw_phi2, dtype=np.float64).copy()
             if raw_phi2 is not None
@@ -620,6 +668,11 @@ class GraphEnv:
         self.current_phi4 = (
             np.asarray(raw_phi4, dtype=np.float64).copy()
             if raw_phi4 is not None
+            else None
+        )
+        self.current_evecs = (
+            np.asarray(raw_evecs, dtype=np.float64).copy()
+            if raw_evecs is not None
             else None
         )
         raw_meta = state.get("episode_init_metadata")
@@ -652,6 +705,8 @@ class VectorGraphEnvManager:
         incremental_observation: bool = True,
         init_mode: str = "path",
         initial_adj_builder: Optional[InitAdjBuilder] = None,
+        reward_alpha: float = 0.5,
+        reward_eta: float = 1.0,
     ):
         if init_mode not in {"path", "backbone"}:
             raise ValueError(f"Unsupported init_mode: {init_mode}")
@@ -661,6 +716,8 @@ class VectorGraphEnvManager:
         self.init_mode = init_mode
         self.rl_variant = str(rl_variant)
         self.compute_spectral_each_step = bool(compute_spectral_each_step)
+        self.reward_alpha = float(reward_alpha)
+        self.reward_eta = float(reward_eta)
         self.initial_adj_builder = initial_adj_builder
         self.envs: List[GraphEnv] = [
             GraphEnv(
@@ -673,6 +730,8 @@ class VectorGraphEnvManager:
                 rl_variant=self.rl_variant,
                 compute_spectral_each_step=self.compute_spectral_each_step,
                 incremental_observation=incremental_observation,
+                reward_alpha=self.reward_alpha,
+                reward_eta=self.reward_eta,
             )
             for i in range(num_envs)
         ]
