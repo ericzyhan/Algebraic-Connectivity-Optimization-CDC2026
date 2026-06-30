@@ -272,9 +272,9 @@ class GraphEnv:
                 raise ValueError("init_mode='backbone' requires initial_adj_builder.")
             init_seed = self._init_seed_base
             init_adj, init_meta = initial_adj_builder(
-                n=int(self.n),
-                rho_target=float(self.rho_target),
-                seed=int(init_seed),
+                int(self.n),
+                float(self.rho_target),
+                int(init_seed),
             )
             adj = np.asarray(init_adj, dtype=np.uint8)
             if adj.shape != (self.n, self.n):
@@ -408,6 +408,7 @@ class GraphEnv:
         else:
             lambda2 = float(self.current_lambda2)
             lambda3 = float(self.current_lambda3)
+            lambda4 = float(self.current_lambda4)
             phi2 = (
                 np.asarray(self.current_phi2, dtype=np.float64)
                 if self.current_phi2 is not None
