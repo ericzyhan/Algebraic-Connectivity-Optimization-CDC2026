@@ -29,6 +29,9 @@ class EnvConfig:
     terminal_bonus_coef: float = 0.2
     reward_alpha: float = 0.5
     reward_eta: float = 0.0  # 0 = auto (calibrated per n); set >0 to override
+    reward_alpha_l2: float = 0.4
+    reward_alpha_rg: float = 0.3
+    reward_eta_pmin: float = 0.0  # 0 = auto (calibrated per n); set >0 to override
 
 
 @dataclass
@@ -206,6 +209,11 @@ DEFAULT_CONFIG_DICT: Dict[str, Any] = {
         "top_k": 128,
         "dist_cap": 4,
         "terminal_bonus_coef": 0.2,
+        "reward_alpha": 0.5,
+        "reward_eta": 0.0,
+        "reward_alpha_l2": 0.4,
+        "reward_alpha_rg": 0.3,
+        "reward_eta_pmin": 0.0,
     },
     "model": {
         "gat_hidden_dim": 64,

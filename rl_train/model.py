@@ -24,7 +24,7 @@ class ForwardOutput:
 
 def feature_dims_for_variant(variant_name: str) -> tuple[int, int, int]:
     if variant_name == "full":
-        return 5, 7, 6
+        return 6, 8, 9
     if variant_name == "lite_v2":
         return 3, 5, 3
     raise ValueError(f"Unsupported variant: {variant_name}")

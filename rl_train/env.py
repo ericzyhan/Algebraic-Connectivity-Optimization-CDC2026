@@ -23,10 +23,12 @@ from .features.lite import (
 from .graph_math import (
     build_path_adjacency,
     edge_count,
+    IncrementalSpectralState,
     m_target_from_rho,
     normalized_density,
+    pairwise_effective_resistance,
+    resistance_curvature,
     spectral_features,
-    total_effective_resistance,
 )
 
 InitAdjBuilder = Callable[[int, float, int], Tuple[np.ndarray, Dict[str, Any]]]
@@ -86,6 +88,9 @@ class GraphEnv:
         incremental_observation: bool = True,
         reward_alpha: float = 0.5,
         reward_eta: float = 1.0,
+        reward_alpha_l2: float = 0.4,
+        reward_alpha_rg: float = 0.3,
+        reward_eta_pmin: float = 0.0,
     ):
         self.env_id = env_id
         self.scheduler = scheduler
@@ -94,6 +99,9 @@ class GraphEnv:
         self.terminal_bonus_coef = terminal_bonus_coef
         self.reward_alpha = float(reward_alpha)
         self.reward_eta = float(reward_eta)
+        self.reward_alpha_l2 = float(reward_alpha_l2)
+        self.reward_alpha_rg = float(reward_alpha_rg)
+        self.reward_eta_pmin = float(reward_eta_pmin)
         self.rl_variant = str(rl_variant)
         self.compute_spectral_each_step = bool(compute_spectral_each_step)
         self.incremental_observation = bool(incremental_observation)
@@ -119,6 +127,12 @@ class GraphEnv:
         self.current_phi3: Optional[np.ndarray] = None
         self.current_phi4: Optional[np.ndarray] = None
         self.current_evecs: Optional[np.ndarray] = None
+        self.current_evals: Optional[np.ndarray] = None
+        self.current_curvature: Optional[np.ndarray] = None
+        self.current_P_min: float = 0.0
+        self.current_P_mean: float = 0.0
+        self.current_P_var: float = 0.0
+        self._inc_state: Optional[IncrementalSpectralState] = None
         self._deg_cache: Optional[np.ndarray] = None
         self._a2_counts: Optional[np.ndarray] = None
         self._triangles_per_node: Optional[np.ndarray] = None
@@ -136,6 +150,69 @@ class GraphEnv:
         [0.803010, 0.368719, 0.104369, 0.019933, 0.006965, 0.001646, 0.000596],
         dtype=np.float64,
     )
+
+    # Empirical η_P(n) calibration — placeholder until estimate_eta.py is run
+    _ETA_PMIN_TABLE_NS = np.array([8, 12, 16, 24, 32, 48, 64], dtype=np.float64)
+    _ETA_PMIN_TABLE_VALS = np.array(
+        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        dtype=np.float64,
+    )
+
+    def _effective_eta_pmin(self) -> float:
+        """Return η_P for curvature reward term (calibrated per n)."""
+        if float(self.reward_eta_pmin) > 0.0:
+            return float(self.reward_eta_pmin)
+        n_f = float(max(2, self.n))
+        ns = type(self)._ETA_PMIN_TABLE_NS
+        vs = type(self)._ETA_PMIN_TABLE_VALS
+        if n_f <= float(ns[0]):
+            return float(vs[0])
+        if n_f >= float(ns[-1]):
+            return float(vs[-1])
+        return float(np.interp(n_f, ns, vs))
+
+    def _init_inc_state(self) -> None:
+        """Create IncrementalSpectralState from current adjacency and do initial refresh."""
+        if self.adj is None:
+            return
+        self._inc_state = IncrementalSpectralState(
+            self.adj.astype(np.uint8),
+            exact_reset_every=32,
+            spectral_refresh_every=1,
+            eigsh_cutoff_n=96,
+        )
+        self._inc_state.refresh_spectral(force=True)
+        self._sync_from_inc_state()
+
+    def _sync_from_inc_state(self) -> None:
+        """Copy all spectral quantities from incremental state to env fields."""
+        if self._inc_state is None:
+            return
+        s = self._inc_state
+        self.current_lambda2 = s.lam2
+        self.current_lambda3 = s.lam3
+        self.current_lambda4 = s.lam4
+        self.current_phi2 = s.phi2.copy()
+        self.current_phi3 = s.phi3.copy()
+        self.current_phi4 = s.phi4.copy()
+        self.current_evecs = s.evecs.copy()
+        self.current_evals = s.evals.copy()
+        self.current_rg = s.rg
+        self.current_multiplicity = s.multiplicity
+        self.current_curvature = s.curvature.copy()
+        self.current_P_min = s.P_min
+        self.current_P_mean = s.P_mean
+        self.current_P_var = s.P_var
+
+    def _compute_and_store_curvature(self, evals: np.ndarray, evecs: np.ndarray) -> None:
+        """Compute resistance curvature from eigenvalues/eigenvectors and cache results."""
+        if self.adj is None:
+            return
+        curvature, P_min, P_mean, P_var = resistance_curvature(self.adj, evals, evecs)
+        self.current_curvature = curvature.copy()
+        self.current_P_min = float(P_min)
+        self.current_P_mean = float(P_mean)
+        self.current_P_var = float(P_var)
 
     def _effective_eta(self) -> float:
         """Return η for the current graph size n.
@@ -301,11 +378,8 @@ class GraphEnv:
             self.episode_len = 0
             if self.incremental_observation:
                 self._initialize_incremental_state()
-            lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_features(self.adj)
-            self.current_rg = float(rg)
-            self.current_multiplicity = int(mult)
-            self.current_evecs = evecs.copy()
-            return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
+            self._init_inc_state()
+            return self._build_observation()
 
         self.adj = build_path_adjacency(self.n)
         self._episode_init_metadata = normalize_init_metadata(
@@ -317,11 +391,8 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_features(self.adj)
-        self.current_rg = float(rg)
-        self.current_multiplicity = int(mult)
-        self.current_evecs = evecs.copy()
-        return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
+        self._init_inc_state()
+        return self._build_observation()
 
     def reset_with_target(
         self,
@@ -366,17 +437,10 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_features(self.adj)
-        self.current_rg = float(rg)
-        self.current_multiplicity = int(mult)
-        self.current_evecs = evecs.copy()
-        return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
+        self._init_inc_state()
+        return self._build_observation()
 
-    def _build_observation(
-        self,
-        *,
-        spectral_cache: Optional[Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = None,
-    ) -> GraphObservation:
+    def _build_observation(self) -> GraphObservation:
         if self.adj is None:
             raise RuntimeError("Environment not initialized")
 
@@ -384,53 +448,42 @@ class GraphEnv:
         m = edge_count(self.adj)
         rho_current = normalized_density(n, m)
 
-        use_spectral = (self.rl_variant == "full") or self.compute_spectral_each_step
-        if spectral_cache is not None:
-            lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs = spectral_cache
-            self.current_lambda2 = float(lambda2)
-            self.current_lambda3 = float(lambda3)
-            self.current_lambda4 = float(lambda4)
-            self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
-            self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
-            self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
-            self.current_evecs = evecs.copy()
-        elif use_spectral:
-            lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_features(self.adj)
-            self.current_lambda2 = float(lambda2)
-            self.current_lambda3 = float(lambda3)
-            self.current_lambda4 = float(lambda4)
-            self.current_rg = float(rg)
-            self.current_multiplicity = int(mult)
-            self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
-            self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
-            self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
-            self.current_evecs = evecs.copy()
-        else:
-            lambda2 = float(self.current_lambda2)
-            lambda3 = float(self.current_lambda3)
-            lambda4 = float(self.current_lambda4)
-            phi2 = (
-                np.asarray(self.current_phi2, dtype=np.float64)
-                if self.current_phi2 is not None
-                else np.zeros((n,), dtype=np.float64)
-            )
-            phi3 = (
-                np.asarray(self.current_phi3, dtype=np.float64)
-                if self.current_phi3 is not None
-                else np.zeros((n,), dtype=np.float64)
-            )
-            phi4 = (
-                np.asarray(self.current_phi4, dtype=np.float64)
-                if self.current_phi4 is not None
-                else np.zeros((n,), dtype=np.float64)
-            )
+        lambda2 = float(self.current_lambda2)
+        lambda3 = float(self.current_lambda3)
+        lambda4 = float(self.current_lambda4)
+        phi2 = (
+            np.asarray(self.current_phi2, dtype=np.float64)
+            if self.current_phi2 is not None
+            else np.zeros((n,), dtype=np.float64)
+        )
+        phi3 = (
+            np.asarray(self.current_phi3, dtype=np.float64)
+            if self.current_phi3 is not None
+            else np.zeros((n,), dtype=np.float64)
+        )
+        phi4 = (
+            np.asarray(self.current_phi4, dtype=np.float64)
+            if self.current_phi4 is not None
+            else np.zeros((n,), dtype=np.float64)
+        )
 
         if self.rl_variant == "full":
+            curvature_arr = (
+                self.current_curvature
+                if self.current_curvature is not None
+                else np.zeros((n,), dtype=np.float64)
+            )
+            P_min = float(self.current_P_min)
+            P_mean = float(self.current_P_mean)
+            P_var = float(self.current_P_var)
+            eigvals: Optional[np.ndarray] = self.current_evals
+
             node_features, deg = build_node_features_full(
                 adj=self.adj,
                 n=n,
                 phi2=phi2,
                 phi3=phi3,
+                curvature=curvature_arr,
                 incremental_observation=self.incremental_observation,
                 deg_cache=self._deg_cache,
                 a2_counts=self._a2_counts,
@@ -444,6 +497,9 @@ class GraphEnv:
                 lambda2=lambda2,
                 lambda3=lambda3,
                 lambda4=lambda4,
+                P_min=P_min,
+                P_mean=P_mean,
+                P_var=P_var,
             )
             if self.current_evecs is None:
                 raise RuntimeError("Eigenvectors not available for full variant observation")
@@ -463,6 +519,8 @@ class GraphEnv:
                 pair_j=self._pair_j,
                 pair_is_nonedge=self._pair_is_nonedge,
                 dist_matrix=self._dist_matrix,
+                evals=eigvals,
+                inc_state=self._inc_state,
             )
         elif self.rl_variant == "lite_v2":
             node_features, deg = build_node_features_lite(
@@ -530,6 +588,10 @@ class GraphEnv:
         self.adj[i, j] = 1
         self.adj[j, i] = 1
         self.episode_len += 1
+        if self._inc_state is not None:
+            self._inc_state.add_edge(i, j)
+            self._inc_state.refresh_spectral()
+            self._sync_from_inc_state()
         if self.incremental_observation:
             self._update_incremental_state_after_add(
                 i=i,
@@ -545,52 +607,68 @@ class GraphEnv:
 
         if use_spectral:
             old_rg = float(self.current_rg)
-            new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_rg, new_mult, new_evecs = spectral_features(self.adj)
-            self.current_lambda2 = float(new_lambda2)
-            self.current_lambda3 = float(new_lambda3)
-            self.current_lambda4 = float(new_lambda4)
-            self.current_rg = float(new_rg)
-            self.current_multiplicity = int(new_mult)
-            self.current_evecs = new_evecs.copy()
-            self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
-            self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
-            self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
+            old_P_min = float(self.current_P_min)
 
-            # Blended reward: r_t = α·Δλ₂/n + (1-α)·η·ΔR_G/n² + β·𝟙_term·λ₂/n
-            # ΔR_G is positive when resistance decreases (old - new).
-            nf = float(max(1, self.n))
-            delta_l2 = float(new_lambda2 - old_lambda2)
-            delta_rg = float(old_rg - new_rg)
-
-            alpha = float(self.reward_alpha)
-            eta = self._effective_eta()
-
-            reward_l2 = delta_l2 / nf
-            reward_rg = eta * delta_rg / (nf * nf)
-
-            reward = alpha * reward_l2 + (1.0 - alpha) * reward_rg
-
-            if done:
-                # Terminal bonus based on final λ₂ (keeps original logic)
-                reward += self.terminal_bonus_coef * (new_lambda2 / nf)
-            obs = self._build_observation(
-                spectral_cache=(new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_evecs)
-            )
-            terminal_lambda2_norm = (new_lambda2 / nf) if done else None
-        else:
-            # Fast inference path for lite_v2: avoid per-step spectral decomposition.
-            if done:
-                new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_rg, new_mult, new_evecs = spectral_features(self.adj)
-                self.current_lambda2 = float(new_lambda2)
-                self.current_lambda3 = float(new_lambda3)
-                self.current_lambda4 = float(new_lambda4)
+            # Fallback to full eigh only if inc_state not available
+            if self._inc_state is None:
+                new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spectral_features(self.adj)
+                self.current_lambda2 = float(new_l2)
+                self.current_lambda3 = float(new_l3)
+                self.current_lambda4 = float(new_l4)
                 self.current_rg = float(new_rg)
                 self.current_multiplicity = int(new_mult)
                 self.current_evecs = new_evecs.copy()
                 self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
                 self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
                 self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
-                terminal_lambda2_norm = new_lambda2 / float(max(1, self.n))
+                self.current_evals = new_evals.copy()
+                self._compute_and_store_curvature(new_evals, new_evecs)
+
+            new_lambda2 = self.current_lambda2
+
+            # 3-term convex reward:
+            #   r_t = α₁·Δλ₂/n + α₂·η_R·ΔR_G/n² + α₃·η_P·ΔP_min + β·𝟙_term·λ₂/n
+            nf = float(max(1, self.n))
+            delta_l2 = float(new_lambda2 - old_lambda2)
+            delta_rg = float(old_rg - self.current_rg)
+            delta_pmin = float(self.current_P_min - old_P_min)
+
+            alpha_l2 = float(self.reward_alpha_l2)
+            alpha_rg = float(self.reward_alpha_rg)
+            alpha_pmin = 1.0 - alpha_l2 - alpha_rg
+
+            eta_r = self._effective_eta()
+            eta_p = self._effective_eta_pmin()
+
+            reward_l2 = delta_l2 / nf
+            reward_rg = eta_r * delta_rg / (nf * nf)
+            reward_pmin = eta_p * delta_pmin
+
+            reward = alpha_l2 * reward_l2 + alpha_rg * reward_rg + alpha_pmin * reward_pmin
+
+            if done:
+                reward += self.terminal_bonus_coef * (new_lambda2 / nf)
+            obs = self._build_observation()
+            terminal_lambda2_norm = (new_lambda2 / nf) if done else None
+        else:
+            # Fast inference path for lite_v2
+            if done:
+                if self._inc_state is not None:
+                    self._inc_state.refresh_spectral(force=True)
+                    self._sync_from_inc_state()
+                else:
+                    new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spectral_features(self.adj)
+                    self.current_lambda2 = float(new_l2)
+                    self.current_lambda3 = float(new_l3)
+                    self.current_lambda4 = float(new_l4)
+                    self.current_rg = float(new_rg)
+                    self.current_multiplicity = int(new_mult)
+                    self.current_evecs = new_evecs.copy()
+                    self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
+                    self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
+                    self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
+                    self.current_evals = new_evals.copy()
+                terminal_lambda2_norm = self.current_lambda2 / float(max(1, self.n))
             else:
                 terminal_lambda2_norm = None
             obs = self._build_observation()
@@ -631,6 +709,11 @@ class GraphEnv:
             "current_phi3": self.current_phi3,
             "current_phi4": self.current_phi4,
             "current_evecs": self.current_evecs,
+            "current_evals": self.current_evals,
+            "current_curvature": self.current_curvature,
+            "current_P_min": self.current_P_min,
+            "current_P_mean": self.current_P_mean,
+            "current_P_var": self.current_P_var,
             "episode_init_metadata": dict(self._episode_init_metadata),
             "py_rng_state": self.py_rng.getstate(),
             "np_rng_state": self.np_rng.get_state(),
@@ -676,6 +759,21 @@ class GraphEnv:
             if raw_evecs is not None
             else None
         )
+        raw_evals = state.get("current_evals")
+        self.current_evals = (
+            np.asarray(raw_evals, dtype=np.float64).copy()
+            if raw_evals is not None
+            else None
+        )
+        raw_curvature = state.get("current_curvature")
+        self.current_curvature = (
+            np.asarray(raw_curvature, dtype=np.float64).copy()
+            if raw_curvature is not None
+            else None
+        )
+        self.current_P_min = float(state.get("current_P_min", 0.0))
+        self.current_P_mean = float(state.get("current_P_mean", 0.0))
+        self.current_P_var = float(state.get("current_P_var", 0.0))
         raw_meta = state.get("episode_init_metadata")
         raw_mode = "path"
         if isinstance(raw_meta, dict):
@@ -708,6 +806,9 @@ class VectorGraphEnvManager:
         initial_adj_builder: Optional[InitAdjBuilder] = None,
         reward_alpha: float = 0.5,
         reward_eta: float = 1.0,
+        reward_alpha_l2: float = 0.4,
+        reward_alpha_rg: float = 0.3,
+        reward_eta_pmin: float = 0.0,
     ):
         if init_mode not in {"path", "backbone"}:
             raise ValueError(f"Unsupported init_mode: {init_mode}")
@@ -719,6 +820,9 @@ class VectorGraphEnvManager:
         self.compute_spectral_each_step = bool(compute_spectral_each_step)
         self.reward_alpha = float(reward_alpha)
         self.reward_eta = float(reward_eta)
+        self.reward_alpha_l2 = float(reward_alpha_l2)
+        self.reward_alpha_rg = float(reward_alpha_rg)
+        self.reward_eta_pmin = float(reward_eta_pmin)
         self.initial_adj_builder = initial_adj_builder
         self.envs: List[GraphEnv] = [
             GraphEnv(
@@ -733,6 +837,9 @@ class VectorGraphEnvManager:
                 incremental_observation=incremental_observation,
                 reward_alpha=self.reward_alpha,
                 reward_eta=self.reward_eta,
+                reward_alpha_l2=self.reward_alpha_l2,
+                reward_alpha_rg=self.reward_alpha_rg,
+                reward_eta_pmin=self.reward_eta_pmin,
             )
             for i in range(num_envs)
         ]

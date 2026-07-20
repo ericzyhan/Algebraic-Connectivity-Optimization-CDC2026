@@ -23,6 +23,9 @@ env:
   terminal_bonus_coef: 0.2
   reward_alpha: 0.5
   reward_eta: 0.0        # 0 = auto-calibrated per n; set >0 to override
+  reward_alpha_l2: 0.4   # α₁ for Δλ₂/n term
+  reward_alpha_rg: 0.3   # α₂ for η·ΔR_G/n² term (α₃ = 1 - α₁ - α₂ for ΔP_min)
+  reward_eta_pmin: 0.0   # 0 = auto-calibrated per n; set >0 to override
 
 model:
   gat_hidden_dim: 64

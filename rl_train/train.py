@@ -449,6 +449,9 @@ def run_training(
         initial_adj_builder=initial_adj_builder,
         reward_alpha=cfg.env.reward_alpha,
         reward_eta=cfg.env.reward_eta,
+        reward_alpha_l2=cfg.env.reward_alpha_l2,
+        reward_alpha_rg=cfg.env.reward_alpha_rg,
+        reward_eta_pmin=cfg.env.reward_eta_pmin,
     )
 
     model = _build_model(cfg, device_obj)

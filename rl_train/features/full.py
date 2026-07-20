@@ -21,6 +21,7 @@ def build_node_features(
     n: int,
     phi2: np.ndarray,
     phi3: np.ndarray,
+    curvature: np.ndarray,
     incremental_observation: bool,
     deg_cache: Optional[np.ndarray],
     a2_counts: Optional[np.ndarray],
@@ -58,6 +59,7 @@ def build_node_features(
             phi2,
             phi3,
             cluster,
+            curvature,
         ],
         axis=1,
     ).astype(np.float32)
@@ -72,6 +74,9 @@ def build_global_features(
     lambda2: float,
     lambda3: float,
     lambda4: float,
+    P_min: float,
+    P_mean: float,
+    P_var: float,
 ) -> np.ndarray:
     return np.array(
         [
@@ -81,6 +86,9 @@ def build_global_features(
             float(lambda2 / max(1, n)),
             float(lambda3 / max(1, n)),
             float(lambda4 / max(1, n)),
+            float(P_min),
+            float(P_mean),
+            float(P_var),
         ],
         dtype=np.float32,
     )
@@ -122,6 +130,9 @@ def build_candidate_features(
     pair_j: Optional[np.ndarray],
     pair_is_nonedge: Optional[np.ndarray],
     dist_matrix: Optional[np.ndarray],
+    omega_pairs: Optional[np.ndarray] = None,
+    evals: Optional[np.ndarray] = None,
+    inc_state: Any = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     if (
         incremental_observation
@@ -134,7 +145,7 @@ def build_candidate_features(
         if nonedge_pair_idx.size == 0:
             return (
                 np.zeros((0, 2), dtype=np.int64),
-                np.zeros((0, 7), dtype=np.float32),
+                np.zeros((0, 8), dtype=np.float32),
             )
 
         # λ₂ eigenspace gap: H(i,j) = Σ_{k=2}^{d} (φ_k(i) - φ_k(j))²
@@ -150,7 +161,7 @@ def build_candidate_features(
         if not all_non_edges:
             return (
                 np.zeros((0, 2), dtype=np.int64),
-                np.zeros((0, 7), dtype=np.float32),
+                np.zeros((0, 8), dtype=np.float32),
             )
         # λ₂ eigenspace gap for all non-edges
         arr = np.asarray(all_non_edges, dtype=np.int64)
@@ -193,8 +204,19 @@ def build_candidate_features(
 
     h_norm = h_score / max(float(np.max(h_score)), 1e-10)
 
+    # Effective resistance ω_ij for candidate pairs
+    if omega_pairs is not None:
+        omega = omega_pairs
+    elif inc_state is not None:
+        omega = inc_state.effective_resistance_batch(candidate_pairs)
+    elif evals is not None:
+        from ..graph_math import pairwise_effective_resistance
+        omega = pairwise_effective_resistance(evals, evecs, candidate_pairs)
+    else:
+        omega = np.zeros((candidate_pairs.shape[0],), dtype=np.float64)
+
     pair_features = np.stack(
-        [h_score, phi3_gap, phi4_gap, cn_norm, jac, dist_norm, h_norm],
+        [h_score, phi3_gap, phi4_gap, cn_norm, jac, dist_norm, h_norm, omega],
         axis=1,
     ).astype(np.float32, copy=False)
     return candidate_pairs, pair_features

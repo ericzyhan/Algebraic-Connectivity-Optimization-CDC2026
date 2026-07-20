@@ -57,7 +57,7 @@ def spectral_features(
     *,
     eps_abs: float = 1e-12,
     eps_rel: float = 1e-10,
-) -> Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, float, int, np.ndarray]:
+) -> Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, float, int, np.ndarray, np.ndarray]:
     """Compute spectral features, total effective resistance, and λ₂ multiplicity.
 
     Returns
@@ -74,6 +74,8 @@ def spectral_features(
         Number of eigenvalues clustered around λ₂ (within tolerance), excluding λ₁=0.
     evecs : ndarray (n, n)
         Full eigenvector matrix from np.linalg.eigh (columns are eigenvectors).
+    evals : ndarray (n,)
+        Eigenvalues of the Laplacian in ascending order.
     """
     L = laplacian(adj).astype(np.float64)
     evals, evecs = np.linalg.eigh(L)
@@ -104,7 +106,7 @@ def spectral_features(
     mult_mask[0] = False
     multiplicity = int(np.sum(mult_mask))
 
-    return lambda2, lambda3, lambda4, phi2.astype(np.float64), phi3.astype(np.float64), phi4.astype(np.float64), rg, multiplicity, evecs.astype(np.float64)
+    return lambda2, lambda3, lambda4, phi2.astype(np.float64), phi3.astype(np.float64), phi4.astype(np.float64), rg, multiplicity, evecs.astype(np.float64), evals.astype(np.float64)
 
 
 def node_degrees(adj: np.ndarray) -> np.ndarray:
@@ -271,3 +273,402 @@ def top_k_indices(scores: np.ndarray, k: int) -> np.ndarray:
         return np.arange(len(scores), dtype=np.int64)
     order = np.argsort(-scores, kind="mergesort")
     return order[:k].astype(np.int64)
+
+
+def pairwise_effective_resistance(
+    evals: np.ndarray,
+    evecs: np.ndarray,
+    pairs: np.ndarray,
+    *,
+    eps: float = 1e-10,
+) -> np.ndarray:
+    """Compute effective resistance ω_ij for each pair (i,j).
+
+    ω_ij = Σ_{k=2}^{n} (φ_k(i) − φ_k(j))² / λ_k
+
+    Uses the full eigendecomposition (already available from spectral_features).
+    """
+    if pairs.size == 0:
+        return np.zeros((0,), dtype=np.float64)
+    pairs = np.asarray(pairs, dtype=np.int64)
+    n = int(evals.shape[0])
+    if n < 2:
+        return np.zeros((pairs.shape[0],), dtype=np.float64)
+    safe_evals = np.maximum(evals[1:], eps)
+    i_idx = pairs[:, 0]
+    j_idx = pairs[:, 1]
+    phi = evecs[:, 1:].astype(np.float64)  # (n, n-1), skip λ₁=0 eigenvector
+    diff = phi[i_idx, :] - phi[j_idx, :]  # (p, n-1)
+    weighted = diff * diff / safe_evals[np.newaxis, :]  # (p, n-1)
+    return np.sum(weighted, axis=1)  # (p,)
+
+
+def resistance_curvature(
+    adj: np.ndarray,
+    evals: np.ndarray,
+    evecs: np.ndarray,
+    *,
+    eps: float = 1e-10,
+) -> tuple[np.ndarray, float, float, float]:
+    """Compute per-vertex resistance curvature p_i and aggregates.
+
+    p_i = 1 − ½ · Σ_{j~i} ω_ij
+
+    Returns
+    -------
+    p : ndarray (n,) — per-vertex curvature
+    P_min : float — minimum curvature
+    P_mean : float — mean curvature
+    P_var : float — variance of curvature
+    """
+    n = adj.shape[0]
+    if n < 2:
+        p = np.zeros((n,), dtype=np.float64)
+        return p, 0.0, 0.0, 0.0
+
+    rows, cols = np.where(np.triu(adj > 0, k=1))
+    edge_pairs = np.stack([rows, cols], axis=1).astype(np.int64)
+    if edge_pairs.size == 0:
+        p = np.ones((n,), dtype=np.float64)
+        return p, 0.0 if n == 0 else 1.0, 0.0 if n == 0 else 1.0, 0.0
+
+    omega_edges = pairwise_effective_resistance(evals, evecs, edge_pairs, eps=eps)
+
+    # Accumulate Σ_{j~i} ω_ij for each vertex
+    neighbor_sum = np.zeros((n,), dtype=np.float64)
+    for idx in range(edge_pairs.shape[0]):
+        i = int(edge_pairs[idx, 0])
+        j = int(edge_pairs[idx, 1])
+        w = float(omega_edges[idx])
+        neighbor_sum[i] += w
+        neighbor_sum[j] += w
+
+    p = 1.0 - 0.5 * neighbor_sum
+    P_mean = float(np.mean(p))
+    P_min = float(np.min(p))
+    P_var = float(np.var(p))
+    return p.astype(np.float64), P_min, P_mean, P_var
+
+
+class IncrementalSpectralState:
+    """Maintains spectral quantities via rank-1 Sherman-Morrison updates.
+
+    Instead of recomputing the full eigendecomposition O(n³) on every edge
+    addition, this class:
+
+    1.  Computes the grounded Laplacian inverse L_g^{-1} once at init (O(n³)).
+    2.  Updates L_g^{-1} via Sherman-Morrison on each edge addition (O(n²)).
+    3.  Periodically recomputes L_g^{-1} exactly to prevent numerical drift.
+    4.  Lazy-refreshes λ₂, φ₂, φ₃ via eigsh with warm-start.
+    5.  Provides O(1) effective resistance ω_ij for any pair via L_g^{-1}.
+    6.  Caches full eigenvalues/eigenvectors from the most recent refresh.
+
+    For training graphs with n ≤ 128 the O(n²) per-step cost is negligible
+    compared to O(n³) per-step full eigh.
+    """
+
+    def __init__(
+        self,
+        adj: np.ndarray,
+        *,
+        ground: int = 0,
+        exact_reset_every: int = 32,
+        spectral_refresh_every: int = 1,
+        eigsh_cutoff_n: int = 96,
+        eps: float = 1e-10,
+    ) -> None:
+        self.n = adj.shape[0]
+        self.ground = int(ground)
+        self.exact_reset_every = int(exact_reset_every)
+        self.spectral_refresh_every = int(spectral_refresh_every)
+        self.eigsh_cutoff_n = int(eigsh_cutoff_n)
+        self.eps = float(eps)
+
+        self._steps_since_exact = 0
+        self._steps_since_spectral = 10**9
+
+        # Grounded Laplacian inverse (n-1 × n-1)
+        self._inv_lg: np.ndarray = self._compute_grounded_inverse(adj)
+        # Cache the adjacency (bool) for edge lookups
+        self._adj_bool: np.ndarray = (adj > 0)
+
+        # Spectral cache
+        self._lam2: float = 0.0
+        self._lam3: float = 0.0
+        self._lam4: float = 0.0
+        self._phi2: np.ndarray = np.zeros((self.n,), dtype=np.float64)
+        self._phi3: np.ndarray = np.zeros((self.n,), dtype=np.float64)
+        self._phi4: np.ndarray = np.zeros((self.n,), dtype=np.float64)
+        self._rg: float = 0.0
+        self._mult: int = 1
+        self._evals: np.ndarray = np.zeros((self.n,), dtype=np.float64)
+        self._evecs: np.ndarray = np.zeros((self.n, self.n), dtype=np.float64)
+        self._spectral_valid: bool = False
+
+        # Curvature cache
+        self._p: np.ndarray = np.zeros((self.n,), dtype=np.float64)
+        self._P_min: float = 0.0
+        self._P_mean: float = 0.0
+        self._P_var: float = 0.0
+        self._curvature_valid: bool = False
+
+    # ------------------------------------------------------------------
+    # Public properties
+    # ------------------------------------------------------------------
+    @property
+    def lam2(self) -> float:
+        return self._lam2
+
+    @property
+    def lam3(self) -> float:
+        return self._lam3
+
+    @property
+    def lam4(self) -> float:
+        return self._lam4
+
+    @property
+    def phi2(self) -> np.ndarray:
+        return self._phi2
+
+    @property
+    def phi3(self) -> np.ndarray:
+        return self._phi3
+
+    @property
+    def phi4(self) -> np.ndarray:
+        return self._phi4
+
+    @property
+    def rg(self) -> float:
+        return self._rg
+
+    @property
+    def multiplicity(self) -> int:
+        return self._mult
+
+    @property
+    def evals(self) -> np.ndarray:
+        return self._evals
+
+    @property
+    def evecs(self) -> np.ndarray:
+        return self._evecs
+
+    @property
+    def curvature(self) -> np.ndarray:
+        if not self._curvature_valid:
+            self._recompute_curvature()
+        return self._p
+
+    @property
+    def P_min(self) -> float:
+        if not self._curvature_valid:
+            self._recompute_curvature()
+        return self._P_min
+
+    @property
+    def P_mean(self) -> float:
+        if not self._curvature_valid:
+            self._recompute_curvature()
+        return self._P_mean
+
+    @property
+    def P_var(self) -> float:
+        if not self._curvature_valid:
+            self._recompute_curvature()
+        return self._P_var
+
+    # ------------------------------------------------------------------
+    # Initialization
+    # ------------------------------------------------------------------
+    def _compute_grounded_inverse(self, adj: np.ndarray) -> np.ndarray:
+        """Compute (n-1)×(n-1) grounded Laplacian inverse."""
+        adj_f = adj.astype(np.float64, copy=False)
+        deg = np.sum(adj_f, axis=1, dtype=np.float64)
+        L = np.diag(deg) - adj_f
+        keep = [i for i in range(self.n) if i != self.ground]
+        Lg = L[np.ix_(keep, keep)]
+        ridge = 1e-10 * np.eye(Lg.shape[0], dtype=np.float64)
+        return np.linalg.inv(Lg + ridge)
+
+    def _grounded_incidence(self, u: int, v: int) -> np.ndarray:
+        """Incidence vector e_u - e_v in the grounded (n-1)-dim space."""
+        g = np.zeros(self.n - 1, dtype=np.float64)
+        for node, sign in ((u, 1.0), (v, -1.0)):
+            if node == self.ground:
+                continue
+            idx = node if node < self.ground else node - 1
+            g[idx] += sign
+        return g
+
+    # ------------------------------------------------------------------
+    # Edge addition
+    # ------------------------------------------------------------------
+    def add_edge(self, u: int, v: int) -> None:
+        """Add edge (u,v) and update all incremental state."""
+        if self._adj_bool[u, v]:
+            return  # already present
+        self._adj_bool[u, v] = True
+        self._adj_bool[v, u] = True
+
+        # Sherman-Morrison rank-1 update to grounded inverse
+        self._sherman_morrison_update(u, v)
+
+        self._steps_since_exact += 1
+        self._steps_since_spectral += 1
+        self._curvature_valid = False
+        self._spectral_valid = False  # spectra shift; mark stale
+
+        # Periodic exact recompute to prevent drift
+        if self._steps_since_exact >= self.exact_reset_every:
+            self._refresh_exact_inverse()
+            self._steps_since_exact = 0
+
+    def _sherman_morrison_update(self, u: int, v: int) -> None:
+        g = self._grounded_incidence(u, v)
+        x = self._inv_lg @ g
+        denom = 1.0 + float(g.T @ x)
+        if denom <= 1e-12 or not np.isfinite(denom):
+            self._refresh_exact_inverse()
+            return
+        self._inv_lg -= np.outer(x, x) / denom
+
+    def _refresh_exact_inverse(self) -> None:
+        adj = self._adj_bool.astype(np.uint8)
+        self._inv_lg = self._compute_grounded_inverse(adj)
+
+    # ------------------------------------------------------------------
+    # Effective resistance (O(1))
+    # ------------------------------------------------------------------
+    def effective_resistance(self, u: int, v: int) -> float:
+        """Effective resistance ω_uv computed from grounded inverse."""
+        if u == v:
+            return 0.0
+        if u == self.ground:
+            vi = v if v < self.ground else v - 1
+            return float(max(self._inv_lg[vi, vi], 0.0))
+        if v == self.ground:
+            ui = u if u < self.ground else u - 1
+            return float(max(self._inv_lg[ui, ui], 0.0))
+        ui = u if u < self.ground else u - 1
+        vi = v if v < self.ground else v - 1
+        val = self._inv_lg[ui, ui] + self._inv_lg[vi, vi] - 2.0 * self._inv_lg[ui, vi]
+        return float(max(val, 0.0))
+
+    def effective_resistance_batch(self, pairs: np.ndarray) -> np.ndarray:
+        """Compute ω_uv for a batch of pairs.  pairs shape: (p, 2)."""
+        if pairs.size == 0:
+            return np.zeros((0,), dtype=np.float64)
+        pairs = np.asarray(pairs, dtype=np.int64)
+        out = np.empty((pairs.shape[0],), dtype=np.float64)
+        for idx in range(pairs.shape[0]):
+            out[idx] = self.effective_resistance(
+                int(pairs[idx, 0]), int(pairs[idx, 1])
+            )
+        return out
+
+    # ------------------------------------------------------------------
+    # Curvature (recomputed from cached ω_ij)
+    # ------------------------------------------------------------------
+    def _recompute_curvature(self) -> None:
+        n = self.n
+        neighbor_sum = np.zeros((n,), dtype=np.float64)
+        rows, cols = np.where(np.triu(self._adj_bool, k=1))
+        for r, c in zip(rows.tolist(), cols.tolist()):
+            w = self.effective_resistance(r, c)
+            neighbor_sum[r] += w
+            neighbor_sum[c] += w
+        self._p = 1.0 - 0.5 * neighbor_sum
+        self._P_min = float(np.min(self._p))
+        self._P_mean = float(np.mean(self._p))
+        self._P_var = float(np.var(self._p))
+        self._curvature_valid = True
+
+    # ------------------------------------------------------------------
+    # Spectral refresh (lazy, with warm-start)
+    # ------------------------------------------------------------------
+    def refresh_spectral(self, force: bool = False) -> None:
+        """Recompute λ₂,λ₃,λ₄, φ₂,φ₃,φ₄, R_G, multiplicity, evals, evecs."""
+        stale = self._steps_since_spectral >= self.spectral_refresh_every
+        if not force and self._spectral_valid and not stale:
+            return
+
+        n = self.n
+        adj_u8 = self._adj_bool.astype(np.uint8)
+        if n <= self.eigsh_cutoff_n:
+            # Dense path: full eigh
+            adj_f = adj_u8.astype(np.float64, copy=False)
+            deg = np.sum(adj_f, axis=1)
+            L = np.diag(deg) - adj_f
+            evals, evecs = np.linalg.eigh(L)
+            self._evals = evals.astype(np.float64)
+            self._evecs = evecs.astype(np.float64)
+        else:
+            # Sparse path: eigsh with warm-start
+            try:
+                from scipy.sparse import csr_matrix
+                from scipy.sparse.linalg import eigsh
+                adj_f = adj_u8.astype(np.float64, copy=False)
+                deg = np.sum(adj_f, axis=1)
+                L = np.diag(deg) - adj_f
+                Ls = csr_matrix(L)
+                v0 = self._phi2 if self._spectral_valid else None
+                # Request enough eigenvalues to capture λ₂ cluster
+                k_req = min(n - 1, max(4, self._mult + 4))
+                vals, vecs = eigsh(Ls, k=k_req, which="SM", v0=v0, tol=1e-5, maxiter=3000)
+                order = np.argsort(vals)
+                self._evals = vals[order].astype(np.float64)
+                self._evecs = vecs[:, order].astype(np.float64)
+            except Exception:
+                # Fallback to dense
+                adj_f = adj_u8.astype(np.float64, copy=False)
+                deg = np.sum(adj_f, axis=1)
+                L = np.diag(deg) - adj_f
+                evals, evecs = np.linalg.eigh(L)
+                self._evals = evals.astype(np.float64)
+                self._evecs = evecs.astype(np.float64)
+
+        evals = self._evals
+        evecs = self._evecs
+
+        if n >= 3:
+            self._lam2 = float(evals[1])
+            self._lam3 = float(evals[2])
+            self._lam4 = float(evals[3]) if n >= 4 else 0.0
+            self._phi2 = evecs[:, 1].astype(np.float64).copy()
+            self._phi3 = evecs[:, 2].astype(np.float64).copy()
+            self._phi4 = evecs[:, 3].astype(np.float64).copy() if n >= 4 else evecs[:, 2].astype(np.float64).copy()
+        else:
+            self._lam2 = 0.0
+            self._lam3 = 0.0
+            self._lam4 = 0.0
+            self._phi2 = np.zeros((n,), dtype=np.float64)
+            self._phi3 = np.zeros((n,), dtype=np.float64)
+            self._phi4 = np.zeros((n,), dtype=np.float64)
+
+        # R_G = n * Σ_{k=2}^n 1/λ_k
+        safe = np.maximum(evals[1:], 1e-10)
+        self._rg = float(n) * float(np.sum(1.0 / safe))
+
+        # Multiplicity
+        tol = max(1e-12, 1e-10 * max(1.0, abs(self._lam2)))
+        mult_mask = np.abs(evals - self._lam2) <= tol
+        mult_mask[0] = False
+        self._mult = int(np.sum(mult_mask))
+
+        self._spectral_valid = True
+        self._steps_since_spectral = 0
+
+    # ------------------------------------------------------------------
+    # Convenience: return tuple matching spectral_features() signature
+    # ------------------------------------------------------------------
+    def spectral_tuple(self):
+        """Return (lam2, lam3, lam4, phi2, phi3, phi4, rg, mult, evecs, evals)."""
+        self.refresh_spectral()
+        return (
+            self._lam2, self._lam3, self._lam4,
+            self._phi2.copy(), self._phi3.copy(), self._phi4.copy(),
+            self._rg, self._mult,
+            self._evecs.copy(), self._evals.copy(),
+        )
