@@ -590,8 +590,8 @@ class GraphEnv:
         self.episode_len += 1
         if self._inc_state is not None:
             self._inc_state.add_edge(i, j)
-            self._inc_state.refresh_spectral()
-            self._sync_from_inc_state()
+            # NOTE: no refresh_spectral here — spectra handled by spectral_features below.
+            # inc_state only tracks L_g^{-1} (Sherman-Morrison) for O(1) ω_ij and curvature.
         if self.incremental_observation:
             self._update_incremental_state_after_add(
                 i=i,
@@ -609,20 +609,20 @@ class GraphEnv:
             old_rg = float(self.current_rg)
             old_P_min = float(self.current_P_min)
 
-            # Fallback to full eigh only if inc_state not available
-            if self._inc_state is None:
-                new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spectral_features(self.adj)
-                self.current_lambda2 = float(new_l2)
-                self.current_lambda3 = float(new_l3)
-                self.current_lambda4 = float(new_l4)
-                self.current_rg = float(new_rg)
-                self.current_multiplicity = int(new_mult)
-                self.current_evecs = new_evecs.copy()
-                self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
-                self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
-                self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
-                self.current_evals = new_evals.copy()
-                self._compute_and_store_curvature(new_evals, new_evecs)
+            # Always call spectral_features for λ₂, φ₂, etc. (O(n³) eigh once per step).
+            # inc_state is used separately for O(1) ω_ij and curvature via _build_observation.
+            new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spectral_features(self.adj)
+            self.current_lambda2 = float(new_l2)
+            self.current_lambda3 = float(new_l3)
+            self.current_lambda4 = float(new_l4)
+            self.current_rg = float(new_rg)
+            self.current_multiplicity = int(new_mult)
+            self.current_evecs = new_evecs.copy()
+            self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
+            self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
+            self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
+            self.current_evals = new_evals.copy()
+            self._compute_and_store_curvature(new_evals, new_evecs)
 
             new_lambda2 = self.current_lambda2
 
@@ -651,24 +651,20 @@ class GraphEnv:
             obs = self._build_observation()
             terminal_lambda2_norm = (new_lambda2 / nf) if done else None
         else:
-            # Fast inference path for lite_v2
+            # Fast inference path for lite_v2: avoid per-step spectral decomposition.
             if done:
-                if self._inc_state is not None:
-                    self._inc_state.refresh_spectral(force=True)
-                    self._sync_from_inc_state()
-                else:
-                    new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spectral_features(self.adj)
-                    self.current_lambda2 = float(new_l2)
-                    self.current_lambda3 = float(new_l3)
-                    self.current_lambda4 = float(new_l4)
-                    self.current_rg = float(new_rg)
-                    self.current_multiplicity = int(new_mult)
-                    self.current_evecs = new_evecs.copy()
-                    self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
-                    self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
-                    self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
-                    self.current_evals = new_evals.copy()
-                terminal_lambda2_norm = self.current_lambda2 / float(max(1, self.n))
+                new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spectral_features(self.adj)
+                self.current_lambda2 = float(new_l2)
+                self.current_lambda3 = float(new_l3)
+                self.current_lambda4 = float(new_l4)
+                self.current_rg = float(new_rg)
+                self.current_multiplicity = int(new_mult)
+                self.current_evecs = new_evecs.copy()
+                self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
+                self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
+                self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
+                self.current_evals = new_evals.copy()
+                terminal_lambda2_norm = new_l2 / float(max(1, self.n))
             else:
                 terminal_lambda2_norm = None
             obs = self._build_observation()
