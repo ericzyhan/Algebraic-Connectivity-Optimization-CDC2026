@@ -518,7 +518,10 @@ class IncrementalSpectralState:
         self._steps_since_exact += 1
         self._steps_since_spectral += 1
         self._curvature_valid = False
-        self._spectral_valid = False  # spectra shift; mark stale
+        # NOTE: _spectral_valid is NOT set to False here — refresh_spectral()
+        # uses _steps_since_spectral vs spectral_refresh_every to decide when
+        # to re-run the full eigendecomposition. This allows lazy refresh
+        # across multiple edge additions (e.g. only recompute every 4 steps).
 
         # Periodic exact recompute to prevent drift
         if self._steps_since_exact >= self.exact_reset_every:

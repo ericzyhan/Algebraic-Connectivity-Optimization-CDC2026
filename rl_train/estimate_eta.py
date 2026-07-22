@@ -183,6 +183,25 @@ def estimate_eta(
         print(f"    # n={n}:  reward_eta: {eta_r:.6f}  |  reward_eta_pmin: {eta_p:.6f}")
     print()
     print("  Set in config YAML under env.reward_eta and env.reward_eta_pmin")
+    print()
+
+    # Auto-update the η_P table in env.py
+    env_path = Path(__file__).resolve().parent / "env.py"
+    if env_path.exists():
+        vals_str = ", ".join(f"{v:.6f}" for v in all_eta_p)
+        old_line = f"_ETA_PMIN_TABLE_VALS = np.array("
+        new_line = f"_ETA_PMIN_TABLE_VALS = np.array([{vals_str}],"
+        content = env_path.read_text(encoding="utf-8")
+        if old_line in content:
+            content = content.replace(old_line, new_line)
+            env_path.write_text(content, encoding="utf-8")
+            print(f"  [AUTO] Updated η_P table in {env_path}")
+            print(f"         _ETA_PMIN_TABLE_VALS = [{vals_str}]")
+        else:
+            print(f"  [SKIP] Could not find placeholder line in {env_path}")
+    else:
+        print(f"  [SKIP] env.py not found at {env_path}")
+
     print("=" * 76)
 
 

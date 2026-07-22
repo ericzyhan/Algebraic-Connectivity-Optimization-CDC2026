@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 from collections import deque
 import random
 from dataclasses import dataclass
@@ -178,7 +179,7 @@ class GraphEnv:
         self._inc_state = IncrementalSpectralState(
             self.adj.astype(np.uint8),
             exact_reset_every=32,
-            spectral_refresh_every=1,
+            spectral_refresh_every=4,
             eigsh_cutoff_n=96,
         )
         self._inc_state.refresh_spectral(force=True)
@@ -609,9 +610,14 @@ class GraphEnv:
             old_rg = float(self.current_rg)
             old_P_min = float(self.current_P_min)
 
-            # Always call spectral_features for λ₂, φ₂, etc. (O(n³) eigh once per step).
-            # inc_state is used separately for O(1) ω_ij and curvature via _build_observation.
-            new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spectral_features(self.adj)
+            # Use cached incremental spectral state (~O(n²) Sherman-Morrison update
+            # + lazy O(n³) eigendecomposition every spectral_refresh_every steps)
+            # instead of full O(n³) eigh on every step.
+            if self._inc_state is not None:
+                spec = self._inc_state.spectral_tuple()
+                new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spec
+            else:
+                new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spectral_features(self.adj)
             self.current_lambda2 = float(new_l2)
             self.current_lambda3 = float(new_l3)
             self.current_lambda4 = float(new_l4)
@@ -653,7 +659,11 @@ class GraphEnv:
         else:
             # Fast inference path for lite_v2: avoid per-step spectral decomposition.
             if done:
-                new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spectral_features(self.adj)
+                if self._inc_state is not None:
+                    spec = self._inc_state.spectral_tuple()
+                    new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spec
+                else:
+                    new_l2, new_l3, new_l4, phi2, phi3, phi4, new_rg, new_mult, new_evecs, new_evals = spectral_features(self.adj)
                 self.current_lambda2 = float(new_l2)
                 self.current_lambda3 = float(new_l3)
                 self.current_lambda4 = float(new_l4)
@@ -840,6 +850,12 @@ class VectorGraphEnvManager:
             for i in range(num_envs)
         ]
         self.current_obs: List[Optional[GraphObservation]] = [None for _ in range(num_envs)]
+        # Thread pool for parallel environment stepping.
+        # np.linalg.eigh releases the GIL, so cores are well-utilised.
+        self._step_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=num_envs,
+            thread_name_prefix="env-step",
+        )
 
     def _reset_until_actionable(self, env: GraphEnv, global_env_step: int) -> GraphObservation:
         # In backbone mode it is possible to initialize directly at target edge budget
@@ -884,16 +900,29 @@ class VectorGraphEnvManager:
         global_env_step_after_batch: int,
         extra_rewards: Optional[Sequence[float]] = None,
     ) -> Tuple[List[GraphObservation], List[float], List[bool], List[Dict]]:
+        if extra_rewards is None:
+            extra_rewards = [0.0 for _ in range(len(self.envs))]
+
+        num = len(self.envs)
+
+        # Run all env steps in parallel via the persistent thread pool.
+        # np.linalg.eigh releases the GIL, so cores are well-utilised.
+        step_results: List[Tuple[GraphObservation, float, bool, Dict]] = [None] * num  # type: ignore
+        fut_to_idx: Dict[concurrent.futures.Future, int] = {}
+        for i, env in enumerate(self.envs):
+            fut = self._step_pool.submit(env.step, action_pairs[i], float(extra_rewards[i]))
+            fut_to_idx[fut] = i
+        for fut in concurrent.futures.as_completed(fut_to_idx):
+            i = fut_to_idx[fut]
+            step_results[i] = fut.result()
+
+        # Process results sequentially (resets are cheap relative to env steps).
         next_obs: List[GraphObservation] = []
         rewards: List[float] = []
         dones: List[bool] = []
         infos: List[Dict] = []
-
-        if extra_rewards is None:
-            extra_rewards = [0.0 for _ in range(len(self.envs))]
-
         for i, env in enumerate(self.envs):
-            obs, reward, done, info = env.step(action_pairs[i], extra_reward=float(extra_rewards[i]))
+            obs, reward, done, info = step_results[i]
             if done:
                 reset_obs = self._reset_until_actionable(env, global_env_step_after_batch)
                 next_obs.append(reset_obs)
@@ -955,3 +984,7 @@ class VectorGraphEnvManager:
                 raise RuntimeError("Environment observations are not initialized")
             obs.append(item)
         return obs
+
+    def close(self) -> None:
+        """Shut down the thread pool for parallel environment stepping."""
+        self._step_pool.shutdown(wait=False)

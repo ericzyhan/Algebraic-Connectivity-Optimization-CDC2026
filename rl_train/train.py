@@ -920,6 +920,7 @@ def run_training(
         return summary
     finally:
         tracker.close()
+        env_manager.close()
 
 
 def parse_args() -> argparse.Namespace:

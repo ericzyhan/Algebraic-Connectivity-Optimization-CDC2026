@@ -59,9 +59,9 @@ checkpoint:
   dir: experiments/rl/runs/ppo_path_init/checkpoints
 
 determinism:
-  strict: false
+  strict: true
   seed: 1234
-  num_threads: 6
+  num_threads: 1
 
 evaluation:
   episodes: 8

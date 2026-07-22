@@ -95,7 +95,7 @@ class CheckpointConfig:
 class DeterminismConfig:
     strict: bool = True
     seed: int = 1234
-    num_threads: int = 1
+    num_threads: int = 8
 
 
 @dataclass
@@ -263,7 +263,7 @@ DEFAULT_CONFIG_DICT: Dict[str, Any] = {
     "determinism": {
         "strict": True,
         "seed": 1234,
-        "num_threads": 1,
+        "num_threads": 8,
     },
     "evaluation": {
         "episodes": 8,
