@@ -41,6 +41,7 @@ class IncrementalState:
         self._phi2_cache: Optional[np.ndarray] = None
         self._phi3_cache: Optional[np.ndarray] = None
         self._spectral_age = 10**9
+        self._rg_cache = self._compute_total_effective_resistance()
 
     def clone(self) -> "IncrementalState":
         out = IncrementalState(self.adj.copy(), self.config, self.ground)
@@ -51,6 +52,7 @@ class IncrementalState:
         out._phi2_cache = None if self._phi2_cache is None else self._phi2_cache.copy()
         out._phi3_cache = None if self._phi3_cache is None else self._phi3_cache.copy()
         out._spectral_age = self._spectral_age
+        out._rg_cache = self._rg_cache
         return out
 
     @property
@@ -73,14 +75,45 @@ class IncrementalState:
 
     def _recompute_exact_inverse(self) -> None:
         self._inv_lg = spectral.grounded_laplacian_inverse(self.adj, self.ground)
+        self._rg_cache = self._compute_total_effective_resistance()
+
+    def _compute_total_effective_resistance(self) -> float:
+        """R_G = n · trace(L⁺).  Computed from eigenvalues of the Laplacian."""
+        L = spectral.laplacian(self.adj.astype(np.float64))
+        vals = np.linalg.eigvalsh(L)
+        n = self.n
+        return float(n) * float(np.sum(1.0 / np.maximum(vals[1:], 1e-14)))
+
+    def total_effective_resistance(self) -> float:
+        """Return the exact total effective resistance (tracked incrementally)."""
+        return float(self._rg_cache)
 
     def _sherman_morrison_update(self, u: int, v: int) -> None:
         g = spectral.grounded_incidence_vector(u, v, self.n, self.ground)
-        x = self._inv_lg @ g
-        denom = 1.0 + float(g.T @ x)
+        x = self._inv_lg @ g                     # M_old @ g
+        denom = 1.0 + float(g.T @ x)              # 1 + v^T L⁺_old v
         if denom <= 1e-12 or not np.isfinite(denom):
             self._recompute_exact_inverse()
             return
+
+        # ---- exact R_G update via trace identity (before SM) ----
+        # ΔR_G = -n · ‖L⁺_old v‖² / (1 + v^T L⁺_old v)
+        # L⁺_old v restricted to non-ground indices = x - s_old · w_ground
+        # where s_old = M_old @ b, b = ground node adjacency vector
+        b = self.adj[self.ground].astype(np.float64, copy=True)
+        b = np.delete(b, self.ground)
+        s_old = self._inv_lg @ b                 # M_old @ b
+        alpha = float(x.sum())
+        t_old = float(s_old.sum())
+        if abs(1.0 - t_old) > 1e-12:
+            wp_old = -alpha / (1.0 - t_old)
+        else:
+            wp_old = -alpha
+        wg_old = x - s_old * wp_old
+        norm_Lplus_old_v_sq = float(wg_old @ wg_old) + wp_old * wp_old
+        self._rg_cache += -float(self.n) * norm_Lplus_old_v_sq / denom
+
+        # ---- apply SM update ----
         self._inv_lg = self._inv_lg - np.outer(x, x) / denom
 
     def effective_resistance(self, u: int, v: int) -> float:

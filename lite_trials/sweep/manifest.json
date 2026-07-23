@@ -1,0 +1,52 @@
+[
+  {
+    "tag": "lambda2_only",
+    "alpha_1": 1.0,
+    "alpha_2": 0.0,
+    "alpha_3": 0.0,
+    "config_path": "lite_trials/lite_config.yaml",
+    "run_dir": "lite_trials/sweep/lambda2_only",
+    "checkpoint_best": "lite_trials/sweep/lambda2_only/checkpoints/best.pt",
+    "metrics_path": "lite_trials/sweep/lambda2_only/metrics.csv"
+  },
+  {
+    "tag": "resistance_only",
+    "alpha_1": 0.0,
+    "alpha_2": 1.0,
+    "alpha_3": 0.0,
+    "config_path": "lite_trials/lite_config.yaml",
+    "run_dir": "lite_trials/sweep/resistance_only",
+    "checkpoint_best": "lite_trials/sweep/resistance_only/checkpoints/best.pt",
+    "metrics_path": "lite_trials/sweep/resistance_only/metrics.csv"
+  },
+  {
+    "tag": "pmin_only",
+    "alpha_1": 0.0,
+    "alpha_2": 0.0,
+    "alpha_3": 1.0,
+    "config_path": "lite_trials/lite_config.yaml",
+    "run_dir": "lite_trials/sweep/pmin_only",
+    "checkpoint_best": "lite_trials/sweep/pmin_only/checkpoints/best.pt",
+    "metrics_path": "lite_trials/sweep/pmin_only/metrics.csv"
+  },
+  {
+    "tag": "balanced",
+    "alpha_1": 0.34,
+    "alpha_2": 0.33,
+    "alpha_3": 0.33,
+    "config_path": "lite_trials/lite_config.yaml",
+    "run_dir": "lite_trials/sweep/balanced",
+    "checkpoint_best": "lite_trials/sweep/balanced/checkpoints/best.pt",
+    "metrics_path": "lite_trials/sweep/balanced/metrics.csv"
+  },
+  {
+    "tag": "resistance_leaning",
+    "alpha_1": 0.2,
+    "alpha_2": 0.3,
+    "alpha_3": 0.5,
+    "config_path": "lite_trials/lite_config.yaml",
+    "run_dir": "lite_trials/sweep/resistance_leaning",
+    "checkpoint_best": "lite_trials/sweep/resistance_leaning/checkpoints/best.pt",
+    "metrics_path": "lite_trials/sweep/resistance_leaning/metrics.csv"
+  }
+]

@@ -1,8 +1,11 @@
 from __future__ import annotations
 from collections import deque
-from typing import List, Tuple
+from typing import TYPE_CHECKING, List, Tuple
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .incremental_spectral import SpectralTracker
 
 try:
     from scipy.sparse.csgraph import shortest_path as scipy_shortest_path
@@ -271,3 +274,30 @@ def top_k_indices(scores: np.ndarray, k: int) -> np.ndarray:
         return np.arange(len(scores), dtype=np.int64)
     order = np.argsort(-scores, kind="mergesort")
     return order[:k].astype(np.int64)
+
+
+def spectral_features_from_tracker(tracker: SpectralTracker) -> Tuple[
+    float, float, float,
+    np.ndarray, np.ndarray, np.ndarray,
+    float, int, np.ndarray,
+]:
+    """Extract spectral features from an incremental SpectralTracker.
+
+    Returns the same tuple as spectral_features() but without recomputing
+    the full eigendecomposition.  The tracker must have been initialized
+    and kept up-to-date via add_edge() calls.
+
+    Parameters
+    ----------
+    tracker : SpectralTracker
+        An instance from rl_train.incremental_spectral.
+
+    Returns
+    -------
+    lambda2, lambda3, lambda4 : float
+    phi2, phi3, phi4 : ndarray (n,) float64
+    rg : float  — total effective resistance
+    multiplicity : int
+    evecs : ndarray (n, n) float64  — from last exact recomputation
+    """
+    return tracker.get_spectral_features()

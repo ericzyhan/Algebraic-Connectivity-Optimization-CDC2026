@@ -1,0 +1,7 @@
+method,n,delta_lambda2_mean_over_density,delta_lambda2_std_over_density,delta_lambda2_pct_mean_over_density,delta_lambda2_pct_std_over_density,win_pct_vs_rl_path_over_all_points,tie_pct_vs_rl_path_over_all_points,win_count,tie_count,total_points,density_points,avg_repeats_per_point
+RL+Backbone,24,-0.2582315069320897,2.433071994458499,12.998725549675427,62.24705820201003,50.0,0.0,15,0,30,10,3.0
+RL+Backbone,32,-0.8451277759847757,5.126782357172964,37.91312558821488,99.89773914640517,40.0,0.0,12,0,30,10,3.0
+RL+Backbone,91,3.380131348964767,1.6077051383567154,121.0059277315352,302.34676754533683,100.0,0.0,30,0,30,10,3.0
+RL+Path,24,0.0,0.0,0.0,0.0,0.0,100.0,0,30,30,10,3.0
+RL+Path,32,0.0,0.0,0.0,0.0,0.0,100.0,0,30,30,10,3.0
+RL+Path,91,0.0,0.0,0.0,0.0,0.0,100.0,0,30,30,10,3.0

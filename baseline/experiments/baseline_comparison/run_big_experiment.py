@@ -147,12 +147,12 @@ def main() -> None:
         "kopt_combo_cap_del": 500,
         "kopt_seed": 0,
         # SDP-step
-        "sdp_solver": "MOSEK",
+        "sdp_solver": "SCS",
         "sdp_max_iters": 50_000,
         "sdp_eps": 1e-6,
         "sdp_verbose": False,
         # OA (global)
-        "oa_solver": "GUROBI",
+        "oa_solver": "HIGHS",
         "oa_max_iters": 60,
         "oa_tol": 1e-6,
         "oa_verbose": False,

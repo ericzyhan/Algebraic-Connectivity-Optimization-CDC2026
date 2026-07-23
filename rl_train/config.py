@@ -29,6 +29,10 @@ class EnvConfig:
     terminal_bonus_coef: float = 0.2
     reward_alpha: float = 0.5
     reward_eta: float = 0.0  # 0 = auto (calibrated per n); set >0 to override
+    reward_alpha_1: float = 0.34
+    reward_alpha_2: float = 0.33
+    reward_alpha_3: float = 0.33
+    reward_eta_p: float = 1.0
 
 
 @dataclass

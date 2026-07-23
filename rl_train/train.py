@@ -263,7 +263,8 @@ def _evaluate_policy(
     global_env_steps: int,
     init_mode: str = "path",
     backbone_initializer: BackboneInitializer | None = None,
-) -> float:
+) -> Tuple[float, float]:
+    """Returns (mean terminal lambda2/n, mean raw terminal lambda2) over eval episodes."""
     model.eval()
     if selector is not None:
         selector.eval()
@@ -278,7 +279,8 @@ def _evaluate_policy(
         compute_spectral_each_step=True,
     )
 
-    terminal_l2: List[float] = []
+    terminal_l2_norm: List[float] = []
+    terminal_l2_raw: List[float] = []
     episodes = max(1, cfg.evaluation.episodes)
 
     initial_adj_builder = (
@@ -318,12 +320,14 @@ def _evaluate_policy(
                     action_pair = tuple(int(x) for x in obs.candidate_pairs[action_idx])
             obs, _, done, info = eval_env.step(action_pair)
             if done and info.get("terminal_lambda2_norm") is not None:
-                terminal_l2.append(float(info["terminal_lambda2_norm"]))
+                terminal_l2_norm.append(float(info["terminal_lambda2_norm"]))
+            if done and info.get("terminal_lambda2") is not None:
+                terminal_l2_raw.append(float(info["terminal_lambda2"]))
 
     model.train()
     if selector is not None:
         selector.train()
-    return safe_mean(terminal_l2)
+    return safe_mean(terminal_l2_norm), safe_mean(terminal_l2_raw)
 
 
 def _prepare_dirs(cfg: Config) -> None:
@@ -449,6 +453,10 @@ def run_training(
         initial_adj_builder=initial_adj_builder,
         reward_alpha=cfg.env.reward_alpha,
         reward_eta=cfg.env.reward_eta,
+        reward_alpha_1=cfg.env.reward_alpha_1,
+        reward_alpha_2=cfg.env.reward_alpha_2,
+        reward_alpha_3=cfg.env.reward_alpha_3,
+        reward_eta_p=cfg.env.reward_eta_p,
     )
 
     model = _build_model(cfg, device_obj)
@@ -564,6 +572,9 @@ def run_training(
         tensorboard_dir=cfg.logging.tensorboard_dir,
         resumed_elapsed_sec=trainer_state.elapsed_sec_before_resume,
     )
+
+    latest_eval_lambda2_norm = 0.0
+    latest_eval_lambda2 = 0.0
 
     try:
         while trainer_state.global_env_steps < cfg.train.max_env_steps:
@@ -730,7 +741,7 @@ def run_training(
                 trainer_state.latest_learning_rate = reinforce_metrics["learning_rate"]
 
             if trainer_state.global_env_steps - trainer_state.last_eval_env_step >= cfg.logging.eval_every_env_steps:
-                eval_metric = _evaluate_policy(
+                eval_metric, eval_metric_raw = _evaluate_policy(
                     cfg=cfg,
                     model=model,
                     selector=selector,
@@ -740,6 +751,8 @@ def run_training(
                     init_mode=init_mode,
                     backbone_initializer=backbone_initializer,
                 )
+                latest_eval_lambda2_norm = eval_metric
+                latest_eval_lambda2 = eval_metric_raw
                 trainer_state.last_eval_env_step = trainer_state.global_env_steps
 
                 if eval_metric > trainer_state.best_eval_metric:
@@ -785,6 +798,8 @@ def run_training(
                     "eta_sec": eta,
                     "mean_episode_return": safe_mean(recent_returns),
                     "mean_terminal_lambda2_norm": safe_mean(recent_terminal_l2),
+                    "eval_terminal_lambda2_norm_mean": latest_eval_lambda2_norm,
+                    "eval_terminal_lambda2_mean": latest_eval_lambda2,
                     "mean_init_edges": safe_mean(recent_init_edges),
                     "mean_init_lambda2": safe_mean(recent_init_lambda2),
                     "mean_init_build_runtime_sec": safe_mean(recent_init_build_runtime),

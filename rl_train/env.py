@@ -28,6 +28,7 @@ from .graph_math import (
     spectral_features,
     total_effective_resistance,
 )
+from .incremental_spectral import SpectralTracker
 
 InitAdjBuilder = Callable[[int, float, int], Tuple[np.ndarray, Dict[str, Any]]]
 
@@ -86,6 +87,10 @@ class GraphEnv:
         incremental_observation: bool = True,
         reward_alpha: float = 0.5,
         reward_eta: float = 1.0,
+        reward_alpha_1: float = 0.34,
+        reward_alpha_2: float = 0.33,
+        reward_alpha_3: float = 0.33,
+        reward_eta_p: float = 1.0,
     ):
         self.env_id = env_id
         self.scheduler = scheduler
@@ -94,6 +99,10 @@ class GraphEnv:
         self.terminal_bonus_coef = terminal_bonus_coef
         self.reward_alpha = float(reward_alpha)
         self.reward_eta = float(reward_eta)
+        self.reward_alpha_1 = float(reward_alpha_1)
+        self.reward_alpha_2 = float(reward_alpha_2)
+        self.reward_alpha_3 = float(reward_alpha_3)
+        self.reward_eta_p = float(reward_eta_p)
         self.rl_variant = str(rl_variant)
         self.compute_spectral_each_step = bool(compute_spectral_each_step)
         self.incremental_observation = bool(incremental_observation)
@@ -119,6 +128,7 @@ class GraphEnv:
         self.current_phi3: Optional[np.ndarray] = None
         self.current_phi4: Optional[np.ndarray] = None
         self.current_evecs: Optional[np.ndarray] = None
+        self.current_P_min: float = 0.0
         self._deg_cache: Optional[np.ndarray] = None
         self._a2_counts: Optional[np.ndarray] = None
         self._triangles_per_node: Optional[np.ndarray] = None
@@ -128,6 +138,7 @@ class GraphEnv:
         self._pair_is_nonedge: Optional[np.ndarray] = None
         self._pair_to_index: Optional[np.ndarray] = None
         self._eye_mask: Optional[np.ndarray] = None
+        self._spectral_tracker: Optional[SpectralTracker] = None
         self._episode_init_metadata: Dict[str, Any] = default_path_init_metadata(0)
 
     # Empirical η(n) calibration from estimate_eta.py
@@ -155,6 +166,20 @@ class GraphEnv:
         if n_f >= float(ns[-1]):
             return float(vs[-1])
         return float(np.interp(n_f, ns, vs))
+
+    def _init_spectral_tracker(self) -> Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, float, int, np.ndarray]:
+        """Create a fresh SpectralTracker from the current adjacency.
+
+        Returns the initial spectral features (same tuple as spectral_features).
+        """
+        if self.adj is None:
+            raise RuntimeError("adjacency not set")
+        self._spectral_tracker = SpectralTracker(
+            self.adj,
+            ground=0,
+            exact_reset_every=32,
+        )
+        return self._spectral_tracker.get_spectral_features()
 
     def _compute_all_pairs_shortest_path(self, adj: np.ndarray) -> np.ndarray:
         n = adj.shape[0]
@@ -301,10 +326,16 @@ class GraphEnv:
             self.episode_len = 0
             if self.incremental_observation:
                 self._initialize_incremental_state()
-            lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_features(self.adj)
+            spectral_tuple = self._init_spectral_tracker()
+            lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_tuple
             self.current_rg = float(rg)
             self.current_multiplicity = int(mult)
             self.current_evecs = evecs.copy()
+            self.current_P_min = (
+                self._spectral_tracker.get_P_min()
+                if self._spectral_tracker is not None
+                else 0.0
+            )
             return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
 
         self.adj = build_path_adjacency(self.n)
@@ -317,7 +348,8 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_features(self.adj)
+        spectral_tuple = self._init_spectral_tracker()
+        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_tuple
         self.current_rg = float(rg)
         self.current_multiplicity = int(mult)
         self.current_evecs = evecs.copy()
@@ -366,7 +398,8 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_features(self.adj)
+        spectral_tuple = self._init_spectral_tracker()
+        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_tuple
         self.current_rg = float(rg)
         self.current_multiplicity = int(mult)
         self.current_evecs = evecs.copy()
@@ -521,6 +554,7 @@ class GraphEnv:
             raise ValueError(f"Action pair already an edge: {action_pair}")
 
         old_lambda2 = self.current_lambda2
+        old_P_min = self.current_P_min
         adj_row_i_before = self.adj[i].astype(np.int64, copy=True)
         adj_row_j_before = self.adj[j].astype(np.int64, copy=True)
         common_neighbors = np.flatnonzero(
@@ -545,7 +579,13 @@ class GraphEnv:
 
         if use_spectral:
             old_rg = float(self.current_rg)
-            new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_rg, new_mult, new_evecs = spectral_features(self.adj)
+            # Incremental rank-1 update via SpectralTracker (Tier 2)
+            if self._spectral_tracker is not None:
+                self._spectral_tracker.add_edge(i, j)
+                spectral_tuple = self._spectral_tracker.get_spectral_features()
+            else:
+                spectral_tuple = spectral_features(self.adj)
+            new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_rg, new_mult, new_evecs = spectral_tuple
             self.current_lambda2 = float(new_lambda2)
             self.current_lambda3 = float(new_lambda3)
             self.current_lambda4 = float(new_lambda4)
@@ -556,27 +596,41 @@ class GraphEnv:
             self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
             self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
 
-            # Blended reward: r_t = α·Δλ₂/n + (1-α)·η·ΔR_G/n² + β·𝟙_term·λ₂/n
-            # ΔR_G is positive when resistance decreases (old - new).
+            # Blended reward: r_t = α₁·Δλ₂/n + α₂·η_R·ΔR_G/n² + α₃·η_P·ΔP_min
+            # ΔR_G, ΔP_min positive when property improves.
             nf = float(max(1, self.n))
             delta_l2 = float(new_lambda2 - old_lambda2)
             delta_rg = float(old_rg - new_rg)
 
-            alpha = float(self.reward_alpha)
-            eta = self._effective_eta()
+            # P_min from tracker if available
+            if self._spectral_tracker is not None:
+                new_P_min = self._spectral_tracker.get_P_min()
+            else:
+                new_P_min = old_P_min
+            delta_P_min = float(new_P_min - old_P_min)
+            self.current_P_min = new_P_min
+
+            eta_R = self._effective_eta()
+            eta_P = float(self.reward_eta_p)
+
+            alpha1 = float(self.reward_alpha_1)
+            alpha2 = float(self.reward_alpha_2)
+            alpha3 = float(self.reward_alpha_3)
 
             reward_l2 = delta_l2 / nf
-            reward_rg = eta * delta_rg / (nf * nf)
+            reward_rg = eta_R * delta_rg / (nf * nf)
+            reward_pmin = eta_P * delta_P_min
 
-            reward = alpha * reward_l2 + (1.0 - alpha) * reward_rg
+            reward = alpha1 * reward_l2 + alpha2 * reward_rg + alpha3 * reward_pmin
 
             if done:
-                # Terminal bonus based on final λ₂ (keeps original logic)
+                # Terminal bonus based on final λ₂
                 reward += self.terminal_bonus_coef * (new_lambda2 / nf)
             obs = self._build_observation(
                 spectral_cache=(new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_evecs)
             )
             terminal_lambda2_norm = (new_lambda2 / nf) if done else None
+            terminal_lambda2 = float(new_lambda2) if done else None
         else:
             # Fast inference path for lite_v2: avoid per-step spectral decomposition.
             if done:
@@ -591,8 +645,10 @@ class GraphEnv:
                 self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
                 self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
                 terminal_lambda2_norm = new_lambda2 / float(max(1, self.n))
+                terminal_lambda2 = float(new_lambda2)
             else:
                 terminal_lambda2_norm = None
+                terminal_lambda2 = None
             obs = self._build_observation()
 
         reward += float(extra_reward)
@@ -603,6 +659,7 @@ class GraphEnv:
             "episode_return": self.episode_return if done else None,
             "episode_len": self.episode_len if done else None,
             "terminal_lambda2_norm": terminal_lambda2_norm,
+            "terminal_lambda2": terminal_lambda2,
             "rho_target": self.rho_target,
             "n": self.n,
         }
@@ -627,11 +684,17 @@ class GraphEnv:
             "current_lambda4": self.current_lambda4,
             "current_rg": self.current_rg,
             "current_multiplicity": self.current_multiplicity,
+            "current_P_min": self.current_P_min,
             "current_phi2": self.current_phi2,
             "current_phi3": self.current_phi3,
             "current_phi4": self.current_phi4,
             "current_evecs": self.current_evecs,
             "episode_init_metadata": dict(self._episode_init_metadata),
+            "spectral_tracker": (
+                self._spectral_tracker.state_dict()
+                if self._spectral_tracker is not None
+                else None
+            ),
             "py_rng_state": self.py_rng.getstate(),
             "np_rng_state": self.np_rng.get_state(),
         }
@@ -652,6 +715,7 @@ class GraphEnv:
         self.current_lambda4 = float(state.get("current_lambda4", 0.0))
         self.current_rg = float(state.get("current_rg", 0.0))
         self.current_multiplicity = int(state.get("current_multiplicity", 1))
+        self.current_P_min = float(state.get("current_P_min", 0.0))
         raw_phi2 = state.get("current_phi2")
         raw_phi3 = state.get("current_phi3")
         raw_phi4 = state.get("current_phi4")
@@ -690,6 +754,11 @@ class GraphEnv:
         self.incremental_observation = bool(state.get("incremental_observation", True))
         if self.incremental_observation:
             self._initialize_incremental_state()
+        tracker_state = state.get("spectral_tracker")
+        if tracker_state is not None:
+            self._spectral_tracker = SpectralTracker.from_state_dict(tracker_state)
+        else:
+            self._spectral_tracker = None
 
 
 class VectorGraphEnvManager:
@@ -708,6 +777,10 @@ class VectorGraphEnvManager:
         initial_adj_builder: Optional[InitAdjBuilder] = None,
         reward_alpha: float = 0.5,
         reward_eta: float = 1.0,
+        reward_alpha_1: float = 0.34,
+        reward_alpha_2: float = 0.33,
+        reward_alpha_3: float = 0.33,
+        reward_eta_p: float = 1.0,
     ):
         if init_mode not in {"path", "backbone"}:
             raise ValueError(f"Unsupported init_mode: {init_mode}")
@@ -719,6 +792,10 @@ class VectorGraphEnvManager:
         self.compute_spectral_each_step = bool(compute_spectral_each_step)
         self.reward_alpha = float(reward_alpha)
         self.reward_eta = float(reward_eta)
+        self.reward_alpha_1 = float(reward_alpha_1)
+        self.reward_alpha_2 = float(reward_alpha_2)
+        self.reward_alpha_3 = float(reward_alpha_3)
+        self.reward_eta_p = float(reward_eta_p)
         self.initial_adj_builder = initial_adj_builder
         self.envs: List[GraphEnv] = [
             GraphEnv(
@@ -733,6 +810,10 @@ class VectorGraphEnvManager:
                 incremental_observation=incremental_observation,
                 reward_alpha=self.reward_alpha,
                 reward_eta=self.reward_eta,
+                reward_alpha_1=self.reward_alpha_1,
+                reward_alpha_2=self.reward_alpha_2,
+                reward_alpha_3=self.reward_alpha_3,
+                reward_eta_p=self.reward_eta_p,
             )
             for i in range(num_envs)
         ]

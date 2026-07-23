@@ -1,0 +1,62 @@
+{
+  "name": "rl_path_vs_backbone",
+  "config": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\lite_config.yaml",
+  "checkpoint": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\checkpoints\\best.pt",
+  "n_values": [
+    24,
+    32,
+    91
+  ],
+  "points_per_n_requested": 10,
+  "repeats": 3,
+  "seed_start": 0,
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "backbone": {
+    "cayley_index2_overlap_high": 0.6,
+    "cayley_index3_overlap_high": 0.6666666666666666,
+    "cayley_index4_overlap_low": 0.6666666666666666,
+    "cayley_multi_index_overlap": true,
+    "cayley_enable_index4": true,
+    "cayley_eval_mode": "dense"
+  },
+  "total_rows": 180,
+  "plan": {
+    "24": {
+      "n": 24,
+      "m_points": 10,
+      "m_min": 24,
+      "m_max": 275,
+      "rho_min": 0.003952569169960474,
+      "rho_max": 0.9960474308300395,
+      "jobs_n": 60
+    },
+    "32": {
+      "n": 32,
+      "m_points": 10,
+      "m_min": 32,
+      "m_max": 495,
+      "rho_min": 0.002150537634408602,
+      "rho_max": 0.9978494623655914,
+      "jobs_n": 60
+    },
+    "91": {
+      "n": 91,
+      "m_points": 10,
+      "m_min": 91,
+      "m_max": 4094,
+      "rho_min": 0.00024968789013732833,
+      "rho_max": 0.9997503121098626,
+      "jobs_n": 60
+    }
+  },
+  "outputs": {
+    "out_csv": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\results\\raw.csv",
+    "out_meta": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\results\\raw.meta.json",
+    "out_cost_csv": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\results\\summary_cost.csv",
+    "out_quality_csv": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\results\\summary_quality.csv"
+  }
+}
