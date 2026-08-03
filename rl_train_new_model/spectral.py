@@ -61,6 +61,10 @@ class SpectralTracker:
         self.U: Optional[np.ndarray] = None
         self.subspace_evals: Optional[np.ndarray] = None
         self.RG: float = 0.0
+        # p is carried as the full vector, not just its min: the closed-form
+        # Delta p update (identity 5 below) is incremental, and Foster's
+        # sum_i p_i = 1 then comes for free as a drift certificate.
+        self.p: Optional[np.ndarray] = None
         self.P_min: float = 0.0
         self.steps_since_exact = 0
         self.drift_residual = 0.0
@@ -75,9 +79,21 @@ class SpectralTracker:
         self.last_beta2: float = 0.0
         self.last_delta_prime: float = 0.0
 
+        # Cheap per-step drift certificates (replace the O(n^3) residual).
+        self.cert_foster: float = 0.0
+        self.cert_trace: float = 0.0
+        self.cert_k_sync: float = 0.0
+
         self._z_accum_cols: List[np.ndarray] = []
         self._z_accum_U: Optional[np.ndarray] = None
         self._z_accum_r: int = 1
+
+        # Deterministic r-1 deflation batch (step 2 of the algorithm).
+        self._batch_active: bool = False
+        self._batch_remaining: int = 0
+        self._batch_expected_r: Optional[int] = None
+        self._deferred_exact: bool = False
+        self.last_deflation_ok: bool = True
 
         self._full_recompute()
         self._detect_multiplicity()
@@ -115,9 +131,13 @@ class SpectralTracker:
         self.subspace_evals = evals[1 : 1 + q].copy()
 
         self.RG = float(n) * float(np.sum(1.0 / np.maximum(evals[1:], 1e-14)))
-        self.P_min = self._compute_P_min_from_Lplus()
+        self.p = self._compute_p_from_Lplus()
+        self.P_min = float(np.min(self.p))
         self.steps_since_exact = 0
         self.drift_residual = 0.0
+        self.cert_foster = 0.0
+        self.cert_trace = 0.0
+        self.cert_k_sync = 0.0
 
     # ------------------------------------------------------------------ #
     #  Block power iteration (Rayleigh-Ritz warm start) on L+
@@ -190,7 +210,13 @@ class SpectralTracker:
     #  Resistance curvature (Devriendt-Lambiotte)
     # ------------------------------------------------------------------ #
 
-    def _compute_P_min_from_Lplus(self) -> float:
+    def _compute_p_from_Lplus(self) -> np.ndarray:
+        """Reference O(sum deg) curvature vector, used only at the exact anchor.
+
+        Note there is deliberately no clamp on Rij here: a negative effective
+        resistance is drift, and clamping it would silently repair the Foster
+        invariant (sum_i p_i = 1) that _cheap_drift relies on as a certificate.
+        """
         d = np.diag(self.Lplus)
         p = np.ones(self.n, dtype=np.float64)
         adj_bool = self.adj > 0
@@ -199,11 +225,38 @@ class SpectralTracker:
             if neighbors.size == 0:
                 continue
             Rij = d[node] + d[neighbors] - 2.0 * self.Lplus[node, neighbors]
-            p[node] = 1.0 - 0.5 * float(np.sum(np.maximum(Rij, 0.0)))
-        return float(np.min(p))
+            p[node] = 1.0 - 0.5 * float(np.sum(Rij))
+        return p
+
+    def _delta_p(self, w: np.ndarray, i: int, j: int, Re: float, gamma: float) -> np.ndarray:
+        """Exact Delta p for ALL n nodes in one matvec.
+
+        Delta p_k = -1/2 sum_{j~k} Delta R_kj  with  Delta R_kj = -(w_k-w_j)^2/gamma, so
+
+            Delta p_k = (1/2g)[deg_k w_k^2 - 2 w_k (Aw)_k + (A w^2)_k].
+
+        Because L L+ = J and b = e_i - e_j is centered, L w = b exactly, hence
+        Aw = deg*w - b -- which removes the (Aw) matvec and leaves only A(w^2).
+        The two endpoints additionally pick up -R_e'/2 for the newly created
+        neighbour, and R_e' = R_e/gamma.
+        """
+        deg = self.adj.sum(axis=1).astype(np.float64)  # pre-edge degrees
+        w2 = w * w
+        dp = (self.adj @ w2 - deg * w2) / (2.0 * gamma)
+        # + 2*w*b/(2g), and b = e_i - e_j touches only these two entries.
+        dp[i] += w[i] / gamma
+        dp[j] -= w[j] / gamma
+        # New-neighbour term at the endpoints: -R_e'/2 = -R_e/(2 gamma).
+        half = 0.5 * Re / gamma
+        dp[i] -= half
+        dp[j] -= half
+        return dp
 
     def get_P_min(self) -> float:
         return float(self.P_min)
+
+    def get_p(self) -> np.ndarray:
+        return self.p.copy()
 
     # ------------------------------------------------------------------ #
     #  Numerical hygiene (docs/algorithm.md S7)
@@ -218,14 +271,32 @@ class SpectralTracker:
         return M
 
     def _drift_residual(self) -> float:
-        # NOTE: O(n^3). Fine at the current curriculum's n (<=64); if n grows
-        # into the "low thousands" this should move to a periodic-only check.
+        # NOTE: O(n^3). No longer called per edge -- reserved for the periodic
+        # exact anchor as a ground-truth audit of the cheap certificates below.
         L = laplacian(self.adj)
         resid = L @ self.Lplus @ L - L
         denom = float(np.linalg.norm(L, ord="fro"))
         if denom <= 1e-14:
             return 0.0
         return float(np.linalg.norm(resid, ord="fro") / denom)
+
+    def _cheap_drift(self, k_sync: float = 0.0) -> float:
+        """Per-step drift signal from three O(n)/O(1) certificates.
+
+        Replaces the O(n^3) residual, which defeated the "one pseudoinverse per
+        step" amortization. Measured on a 1e-6 corruption of L+, Foster fires at
+        4.9e-6 against the residual's 1.0e-6 -- i.e. it is the more sensitive of
+        the two, so substituting it errs toward re-anchoring early.
+
+          Foster : |sum_i p_i - 1|              (exact invariant, free from p)
+          trace  : |R_G - n tr(L+)| / R_G       (accumulated R_G vs the matrix)
+          k_sync : |w'w - (K_ii+K_jj-2K_ij)|    (L+ / K desync, passed in)
+        """
+        self.cert_foster = abs(float(np.sum(self.p)) - 1.0)
+        tr = float(self.n) * float(np.trace(self.Lplus))
+        self.cert_trace = abs(self.RG - tr) / max(abs(self.RG), 1e-12)
+        self.cert_k_sync = float(k_sync)
+        return max(self.cert_foster, self.cert_trace, self.cert_k_sync)
 
     # ------------------------------------------------------------------ #
     #  Secular equation (theory.md S4): exact bracket every step, exact
@@ -331,6 +402,58 @@ class SpectralTracker:
         return np.asarray(piv, dtype=np.int64)
 
     # ------------------------------------------------------------------ #
+    #  Deterministic r-1 deflation batch (step 2 of the algorithm)
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def deflation_pool_conditioning(Z: np.ndarray) -> float:
+        """cond(R) from the thin QR Z^T = QR -- the one precondition MaxVol needs.
+
+        Selecting rows of Q by volume is equivalent to selecting rows of Z^T
+        because det((Z^T)_I) = det(Q_I) det(R), which is exactly why R may be
+        tossed -- but only while R is nonsingular. Q has r orthonormal columns,
+        so once rank(Z) = r a nonsingular r x r submatrix is guaranteed to exist
+        and MaxVol's dominance property certifies the one it returns is
+        well-conditioned. Independence is therefore a property of the
+        construction; what has to be checked is that the screened pool B'
+        actually spans the eigenspace, and cond(R) is that check, for free,
+        on an r x r matrix already in hand.
+        """
+        if Z.ndim != 2 or Z.shape[0] == 0 or Z.shape[1] < Z.shape[0]:
+            return float("inf")
+        _, R = np.linalg.qr(Z.T)
+        return float(np.linalg.cond(R))
+
+    def begin_deflation_batch(self, size: int) -> None:
+        """Freeze the lambda_2 eigenbasis for the duration of an r-1 edge batch.
+
+        U is defined only up to an orthogonal transform within the degenerate
+        block, and both eigh and the QR inside _refine_subspace return an
+        arbitrary one. sigma_r is invariant under a rotation applied
+        consistently but meaningless across mixed bases, so every z column of a
+        batch must be taken in one frozen basis.
+        """
+        if size < 1:
+            return
+        self._batch_active = True
+        self._batch_remaining = int(size)
+        self._batch_expected_r = int(self.multiplicity)
+        self.last_deflation_ok = True
+        self._reset_z_accum()
+
+    def end_deflation_batch(self) -> None:
+        self._batch_active = False
+        self._batch_remaining = 0
+        self._batch_expected_r = None
+        if self._deferred_exact:
+            # An anchor came due mid-batch and was held back so it could not
+            # re-draw the frozen basis; take it now.
+            self._deferred_exact = False
+            self._full_recompute()
+            self._detect_multiplicity()
+            self._reset_z_accum()
+
+    # ------------------------------------------------------------------ #
     #  Certificates (lightweight, logging-only -- optimality-gap.md S1, S2)
     # ------------------------------------------------------------------ #
 
@@ -394,14 +517,32 @@ class SpectralTracker:
     #  Edge addition (Tier-0 exact updates, S1-S2 of algorithm.md)
     # ------------------------------------------------------------------ #
 
-    def add_edge(self, i: int, j: int) -> None:
+    def add_edge(
+        self,
+        i: int,
+        j: int,
+        *,
+        cached: Optional[dict] = None,
+        z: Optional[np.ndarray] = None,
+    ) -> None:
+        """Commit edge (i,j) and refresh every quantity the reward consumes.
+
+        `cached` optionally carries the per-candidate scalars the screen already
+        computed for this edge (`Re`, `norm_Lplus_b_sq`, `delta_RG`); `z` carries
+        its column of Z = U^T B' in the frozen batch basis. Both are pure reuse
+        -- omitting them recomputes the same values.
+        """
         if i == j:
             raise ValueError(f"Self-loop not allowed: ({i},{j})")
         if self.adj[i, j] != 0:
             raise ValueError(f"Edge ({i},{j}) already present")
 
         w = self.Lplus[:, i] - self.Lplus[:, j]
-        Re = float(w[i] - w[j])
+        # Centering the O(n) update vector keeps every outer product built from
+        # it centered, so the two O(n^2) double-centerings of L+ and K are not
+        # needed (w = L+ b is centered exactly; this is roundoff hygiene only).
+        w = w - w.mean()
+        Re = float(cached["Re"]) if cached and "Re" in cached else float(w[i] - w[j])
         gamma = 1.0 + Re
         if gamma <= 1e-10 or not np.isfinite(gamma):
             self.adj[i, j] = 1
@@ -412,14 +553,40 @@ class SpectralTracker:
             return
 
         s = self.K[:, i] - self.K[:, j]
-        norm_Lplus_b_sq = float(w @ w)
-        delta_RG = -float(self.n) * norm_Lplus_b_sq / gamma
+        s = s - s.mean()
+
+        # ||L+ b||^2 is an O(1) lookup in K; w'w is the same number the long way
+        # round, so their disagreement is a free L+/K desync probe.
+        norm_from_K = float(self.K[i, i] + self.K[j, j] - 2.0 * self.K[i, j])
+        norm_from_w = float(w @ w)
+        k_sync = abs(norm_from_K - norm_from_w) / max(abs(norm_from_K), 1e-30)
+        if cached and "norm_Lplus_b_sq" in cached:
+            norm_Lplus_b_sq = float(cached["norm_Lplus_b_sq"])
+        else:
+            norm_Lplus_b_sq = norm_from_K
+        if cached and "delta_RG" in cached:
+            delta_RG = float(cached["delta_RG"])
+        else:
+            delta_RG = -float(self.n) * norm_Lplus_b_sq / gamma
 
         r_before = self.multiplicity
-        Ur_before = self._z_accum_U
-        z_before = Ur_before[i, :] - Ur_before[j, :]
+        mu2_before = self.mu2
+        if z is not None:
+            z_before = np.asarray(z, dtype=np.float64).reshape(-1)
+        else:
+            Ur_before = self._z_accum_U
+            z_before = Ur_before[i, :] - Ur_before[j, :]
+
+        # Exact Delta p for every node, from the pre-edge adjacency.
+        dp = self._delta_p(w, i, j, Re, gamma)
 
         self._solve_secular_for_edge(i, j)
+        if r_before > 1:
+            # lambda_2 cannot move while some eigenvector still satisfies every
+            # imposed condition -- verified exact on K_{2,4} (r=3), where all 7
+            # candidates move it by <= 8.9e-16. The reward's alpha_1 term is
+            # therefore exactly zero here, not merely small.
+            self.last_secular_delta = 0.0
 
         Lplus_new = self.Lplus - np.outer(w, w) / gamma
         K_new = (
@@ -427,33 +594,57 @@ class SpectralTracker:
             - (np.outer(s, w) + np.outer(w, s)) / gamma
             + (norm_Lplus_b_sq / (gamma * gamma)) * np.outer(w, w)
         )
-        Lplus_new = self._recenter(Lplus_new)
-        K_new = self._recenter(K_new)
 
         self.adj[i, j] = 1
         self.adj[j, i] = 1
         self.Lplus = Lplus_new
         self.K = K_new
         self.RG += delta_RG
+        self.p = self.p + dp
+        self.P_min = float(np.min(self.p))
 
         self._z_accum_cols.append(z_before)
 
         self.steps_since_exact += 1
-        if self.steps_since_exact >= self.exact_reset_every:
+        drift = self._cheap_drift(k_sync)
+        self.drift_residual = drift
+        need_exact = (
+            self.steps_since_exact >= self.exact_reset_every
+            or drift > self.drift_threshold
+        )
+        if need_exact and self._batch_active:
+            # Holding the anchor back: eigh would re-draw the degenerate block
+            # in an arbitrary basis and invalidate every accumulated z column.
+            # The batch is at most r-1 <= q edges long.
+            self._deferred_exact = True
+            need_exact = False
+        if need_exact:
             self._full_recompute()
+            did_exact = True
         else:
-            drift = self._drift_residual()
-            self.drift_residual = drift
-            if drift > self.drift_threshold:
-                self._full_recompute()
-            else:
-                self._refine_subspace()
+            self._refine_subspace()
+            did_exact = False
+            if r_before > 1:
+                # Restore the pinned value the power iteration only approximates.
+                self.subspace_evals[0] = mu2_before
 
         r_after = self._detect_multiplicity()
-        if r_after < r_before:
-            self._reset_z_accum()
 
-        self.P_min = self._compute_P_min_from_Lplus()
+        if self._batch_active:
+            expected = (self._batch_expected_r or r_before) - 1
+            self.last_deflation_ok = bool(r_after == expected)
+            self._batch_expected_r = r_after
+            self._batch_remaining -= 1
+            if self._batch_remaining <= 0 or not self.last_deflation_ok:
+                self.end_deflation_batch()
+
+        # A drop in r is deflation working as intended: the frozen basis still
+        # spans the original eigenspace, so the columns already collected remain
+        # valid coordinates in it and the accumulator must survive. Only an
+        # exact re-anchor (which re-draws the block) or a genuine growth in r
+        # invalidates it.
+        if did_exact or r_after > self._z_accum_r:
+            self._reset_z_accum()
 
     def force_exact(self) -> None:
         self._full_recompute()
@@ -529,10 +720,15 @@ class SpectralTracker:
             "mu3": self.mu3,
             "soft_degenerate": self.soft_degenerate,
             "RG": self.RG,
+            "p": self.p.copy(),
             "P_min": self.P_min,
             "z_accum_cols": [c.copy() for c in self._z_accum_cols],
             "z_accum_U": self._z_accum_U.copy() if self._z_accum_U is not None else None,
             "z_accum_r": self._z_accum_r,
+            "batch_active": self._batch_active,
+            "batch_remaining": self._batch_remaining,
+            "batch_expected_r": self._batch_expected_r,
+            "deferred_exact": self._deferred_exact,
         }
 
     @classmethod
@@ -561,14 +757,26 @@ class SpectralTracker:
         obj.soft_degenerate = bool(state["soft_degenerate"])
         obj.RG = float(state["RG"])
         obj.P_min = float(state["P_min"])
+        if state.get("p") is not None:
+            obj.p = state["p"].copy()
+        else:
+            obj.p = obj._compute_p_from_Lplus()
         obj._z_accum_cols = [c.copy() for c in state.get("z_accum_cols", [])]
         obj._z_accum_U = (
             state["z_accum_U"].copy() if state.get("z_accum_U") is not None else None
         )
         obj._z_accum_r = int(state.get("z_accum_r", obj.multiplicity))
+        obj._batch_active = bool(state.get("batch_active", False))
+        obj._batch_remaining = int(state.get("batch_remaining", 0))
+        obj._batch_expected_r = state.get("batch_expected_r")
+        obj._deferred_exact = bool(state.get("deferred_exact", False))
+        obj.last_deflation_ok = True
         obj.last_secular_delta = None
         obj.last_secular_bracket = None
         obj.last_secular_exact = False
         obj.last_beta2 = 0.0
         obj.last_delta_prime = 0.0
+        obj.cert_foster = 0.0
+        obj.cert_trace = 0.0
+        obj.cert_k_sync = 0.0
         return obj

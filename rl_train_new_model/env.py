@@ -405,6 +405,14 @@ class GraphEnv:
         self.current_rg = float(rg)
         self.current_multiplicity = int(mult)
         self.current_evecs = evecs.copy()
+        # Seed P_min from the tracker, as the backbone branch above does.
+        # Left at 0.0 the first step of the episode would score
+        # Delta P_min = P_min_new - 0 instead of a true delta.
+        self.current_P_min = (
+            self._spectral_tracker.get_P_min()
+            if self._spectral_tracker is not None
+            else 0.0
+        )
         return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
 
     def reset_with_target(
@@ -455,6 +463,11 @@ class GraphEnv:
         self.current_rg = float(rg)
         self.current_multiplicity = int(mult)
         self.current_evecs = evecs.copy()
+        self.current_P_min = (
+            self._spectral_tracker.get_P_min()
+            if self._spectral_tracker is not None
+            else 0.0
+        )
         return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
 
     def _build_observation(

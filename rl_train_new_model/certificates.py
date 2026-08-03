@@ -20,9 +20,17 @@ def log_diagnostics(tracker: SpectralTracker, *, k_remaining: int) -> Dict[str, 
         "cert_resistance_lower": float(lower),
         "cert_resistance_upper": float(upper),
         "cert_resistance_loose_upper": float(loose_upper),
+        # drift_residual is now the max of the three cheap certificates below,
+        # not the O(n^3) Frobenius residual (which is reserved for the periodic
+        # anchor). Same units and same order of magnitude, so the logged series
+        # remains comparable across the change.
         "drift_residual": float(tracker.drift_residual),
+        "cert_foster": float(tracker.cert_foster),
+        "cert_trace": float(tracker.cert_trace),
+        "cert_k_sync": float(tracker.cert_k_sync),
         "multiplicity": int(tracker.multiplicity),
         "soft_degenerate": bool(tracker.soft_degenerate),
+        "deflation_ok": bool(tracker.last_deflation_ok),
         "secular_bracket_width": (
             float(tracker.last_secular_bracket[1] - tracker.last_secular_bracket[0])
             if tracker.last_secular_bracket is not None
