@@ -42,7 +42,7 @@ _MANIFEST_PATH = _SWEEP_ROOT / "manifest.json"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--n-values", type=str, default="12,16,24,32,48,64,91,96,128",
+        "--n-values", type=str, default="12,16,24,32,48,91",
         help="Graph sizes to evaluate. Default spans in-distribution sizes (lite trains on "
              "n=8-12) through out-of-distribution sizes up to 128, mixing power-of-two n "
              "(16/32/64/128, the Cayley backbone's easiest case), even non-power-of-2 n "

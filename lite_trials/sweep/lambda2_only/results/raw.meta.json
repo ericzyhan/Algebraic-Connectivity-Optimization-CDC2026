@@ -1,0 +1,94 @@
+{
+  "name": "rl_path_vs_backbone",
+  "config": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\lite_config.yaml",
+  "checkpoint": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\sweep\\lambda2_only\\checkpoints\\best.pt",
+  "n_values": [
+    12,
+    16,
+    24,
+    32,
+    48,
+    91
+  ],
+  "points_per_n_requested": 15,
+  "repeats": 5,
+  "seed_start": 0,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "backbone": {
+    "cayley_index2_overlap_high": 0.6,
+    "cayley_index3_overlap_high": 0.6666666666666666,
+    "cayley_index4_overlap_low": 0.6666666666666666,
+    "cayley_multi_index_overlap": true,
+    "cayley_enable_index4": true,
+    "cayley_eval_mode": "dense"
+  },
+  "total_rows": 900,
+  "plan": {
+    "12": {
+      "n": 12,
+      "m_points": 15,
+      "m_min": 12,
+      "m_max": 65,
+      "rho_min": 0.01818181818181818,
+      "rho_max": 0.9818181818181818,
+      "jobs_n": 150
+    },
+    "16": {
+      "n": 16,
+      "m_points": 15,
+      "m_min": 16,
+      "m_max": 119,
+      "rho_min": 0.009523809523809525,
+      "rho_max": 0.9904761904761905,
+      "jobs_n": 150
+    },
+    "24": {
+      "n": 24,
+      "m_points": 15,
+      "m_min": 24,
+      "m_max": 275,
+      "rho_min": 0.003952569169960474,
+      "rho_max": 0.9960474308300395,
+      "jobs_n": 150
+    },
+    "32": {
+      "n": 32,
+      "m_points": 15,
+      "m_min": 32,
+      "m_max": 495,
+      "rho_min": 0.002150537634408602,
+      "rho_max": 0.9978494623655914,
+      "jobs_n": 150
+    },
+    "48": {
+      "n": 48,
+      "m_points": 15,
+      "m_min": 48,
+      "m_max": 1127,
+      "rho_min": 0.0009250693802035153,
+      "rho_max": 0.9990749306197965,
+      "jobs_n": 150
+    },
+    "91": {
+      "n": 91,
+      "m_points": 15,
+      "m_min": 91,
+      "m_max": 4094,
+      "rho_min": 0.00024968789013732833,
+      "rho_max": 0.9997503121098626,
+      "jobs_n": 150
+    }
+  },
+  "outputs": {
+    "out_csv": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\sweep\\lambda2_only\\results\\raw.csv",
+    "out_meta": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\sweep\\lambda2_only\\results\\raw.meta.json",
+    "out_cost_csv": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\sweep\\lambda2_only\\results\\summary_cost.csv",
+    "out_quality_csv": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\sweep\\lambda2_only\\results\\summary_quality.csv"
+  }
+}

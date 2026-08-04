@@ -1,0 +1,71 @@
+curriculum:
+  phases:
+  - name: phase_lite
+    start_env_step: 0
+    end_env_step: 20000
+    n_min: 8
+    n_max: 12
+env:
+  num_envs: 4
+  top_k: 64
+  dist_cap: 4
+  terminal_bonus_coef: 0.2
+  reward_alpha_1: 0.15
+  reward_alpha_2: 0.15
+  reward_alpha_3: 0.7
+  reward_eta: 0.0
+  reward_eta_p: 1.0
+  spectral_oversample: 3
+  spectral_exact_reset_every: 50
+  spectral_power_iters: 4
+  spectral_drift_threshold: 1.0e-08
+  spectral_soft_band_rel: 0.01
+  spectral_degeneracy_probe_rel: 1.0e-05
+  tier1_topk_dr: 32
+  tier1_topk_spectral: 32
+  tier2_survivor_size: 32
+  tier3_top: 24
+  tier3_random: 8
+  deflation_macro_action: true
+model:
+  gat_hidden_dim: 32
+  gat_heads: 2
+  gat_layers: 2
+  edge_mlp_hidden_dim: 64
+  value_mlp_hidden_dim: 64
+trainer:
+  algo: ppo
+ppo:
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_ratio: 0.2
+  learning_rate: 0.0003
+  entropy_coef: 0.01
+  value_coef: 0.5
+  max_grad_norm: 1.0
+  update_epochs: 4
+  minibatch_size: 64
+  rollout_env_steps: 1024
+logging:
+  console_log_every_env_steps: 2000
+  eval_every_env_steps: 1000
+  metrics_path: runs/subspace/metrics.csv
+  tensorboard_dir: runs/subspace/tensorboard
+  run_state_path: runs/subspace/run_state.json
+checkpoint:
+  every_env_steps: 2000
+  keep_last_k: 3
+  dir: runs/subspace/checkpoints
+determinism:
+  strict: false
+  seed: 1234
+  num_threads: 2
+evaluation:
+  episodes: 4
+train:
+  max_env_steps: 20000
+  output_dir: runs/subspace
+variant:
+  name: full
+init:
+  mode: path

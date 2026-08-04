@@ -1,0 +1,68 @@
+[
+  {
+    "tag": "old_model",
+    "label": "Old model (rl_train)",
+    "package": "rl_train",
+    "repo_root": "C:\\Users\\erich\\Documents\\AFRL\\old_model",
+    "config_path": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\configs\\old_model.yaml",
+    "run_dir": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\old_model",
+    "checkpoint_best": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\old_model\\checkpoints\\best.pt",
+    "metrics_path": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\old_model\\metrics.csv",
+    "max_env_steps": 20000,
+    "env_overrides": {},
+    "train_wall_sec": 146.27080631256104,
+    "notes": "Baseline. Reward is Delta(lambda_2)/n + terminal bonus; no blend terms exist."
+  },
+  {
+    "tag": "analytic",
+    "label": "Analytic (exact secular)",
+    "package": "analytic_tractable_test_deepseek",
+    "repo_root": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026",
+    "config_path": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\configs\\analytic.yaml",
+    "run_dir": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\analytic",
+    "checkpoint_best": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\analytic\\checkpoints\\best.pt",
+    "metrics_path": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\analytic\\metrics.csv",
+    "max_env_steps": 20000,
+    "env_overrides": {
+      "reward_alpha_1": 0.15,
+      "reward_alpha_2": 0.15,
+      "reward_alpha_3": 0.7,
+      "reward_eta": 0.0,
+      "reward_eta_p": 1.0
+    },
+    "train_wall_sec": 158.73499703407288,
+    "notes": "Full eigenbasis, exact secular root. lambda_2 tracked to ~1e-15."
+  },
+  {
+    "tag": "subspace",
+    "label": "Subspace (certified bracket)",
+    "package": "rl_train_new_model",
+    "repo_root": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026",
+    "config_path": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\configs\\subspace.yaml",
+    "run_dir": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\subspace",
+    "checkpoint_best": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\subspace\\checkpoints\\best.pt",
+    "metrics_path": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\subspace\\metrics.csv",
+    "max_env_steps": 20000,
+    "env_overrides": {
+      "reward_alpha_1": 0.15,
+      "reward_alpha_2": 0.15,
+      "reward_alpha_3": 0.7,
+      "reward_eta": 0.0,
+      "reward_eta_p": 1.0,
+      "spectral_oversample": 3,
+      "spectral_exact_reset_every": 50,
+      "spectral_power_iters": 4,
+      "spectral_drift_threshold": 1e-08,
+      "spectral_soft_band_rel": 0.01,
+      "spectral_degeneracy_probe_rel": 1e-05,
+      "tier1_topk_dr": 32,
+      "tier1_topk_spectral": 32,
+      "tier2_survivor_size": 32,
+      "tier3_top": 24,
+      "tier3_random": 8,
+      "deflation_macro_action": true
+    },
+    "train_wall_sec": 148.19697785377502,
+    "notes": "Bottom-q subspace + block power iteration; bracketed lambda_2, flat in n."
+  }
+]

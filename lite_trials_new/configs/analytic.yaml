@@ -1,0 +1,59 @@
+curriculum:
+  phases:
+  - name: phase_lite
+    start_env_step: 0
+    end_env_step: 20000
+    n_min: 8
+    n_max: 12
+env:
+  num_envs: 4
+  top_k: 64
+  dist_cap: 4
+  terminal_bonus_coef: 0.2
+  reward_alpha_1: 0.15
+  reward_alpha_2: 0.15
+  reward_alpha_3: 0.7
+  reward_eta: 0.0
+  reward_eta_p: 1.0
+model:
+  gat_hidden_dim: 32
+  gat_heads: 2
+  gat_layers: 2
+  edge_mlp_hidden_dim: 64
+  value_mlp_hidden_dim: 64
+trainer:
+  algo: ppo
+ppo:
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_ratio: 0.2
+  learning_rate: 0.0003
+  entropy_coef: 0.01
+  value_coef: 0.5
+  max_grad_norm: 1.0
+  update_epochs: 4
+  minibatch_size: 64
+  rollout_env_steps: 1024
+logging:
+  console_log_every_env_steps: 2000
+  eval_every_env_steps: 1000
+  metrics_path: runs/analytic/metrics.csv
+  tensorboard_dir: runs/analytic/tensorboard
+  run_state_path: runs/analytic/run_state.json
+checkpoint:
+  every_env_steps: 2000
+  keep_last_k: 3
+  dir: runs/analytic/checkpoints
+determinism:
+  strict: false
+  seed: 1234
+  num_threads: 2
+evaluation:
+  episodes: 4
+train:
+  max_env_steps: 20000
+  output_dir: runs/analytic
+variant:
+  name: full
+init:
+  mode: path

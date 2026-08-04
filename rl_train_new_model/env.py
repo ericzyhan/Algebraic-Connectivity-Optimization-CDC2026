@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .backbone_init import default_path_init_metadata, normalize_init_metadata
-from .candidacy import PAIR_FEATURE_DIM, run_candidacy_pipeline
+from .candidacy import PAIR_FEATURE_DIM, plan_deflation_batch, run_candidacy_pipeline
 from .certificates import log_diagnostics
 from .curriculum import CurriculumScheduler
 from .features.full import (
@@ -91,8 +91,8 @@ class GraphEnv:
         reward_alpha: float = 0.5,
         reward_eta: float = 1.0,
         reward_alpha_1: float = 0.15,
-        reward_alpha_2: float = 0.70,
-        reward_alpha_3: float = 0.15,
+        reward_alpha_2: float = 0.15,
+        reward_alpha_3: float = 0.70,
         reward_eta_p: float = 1.0,
         shaping_gamma: float = 0.99,
         spectral_oversample: int = 3,
@@ -100,11 +100,13 @@ class GraphEnv:
         spectral_power_iters: int = 4,
         spectral_drift_threshold: float = 1e-8,
         spectral_soft_band_rel: float = 1e-2,
-        tier1_topk_dr: int = 192,
-        tier1_topk_spectral: int = 64,
-        tier2_survivor_size: int = 64,
-        tier3_top: int = 48,
-        tier3_random: int = 16,
+        spectral_degeneracy_probe_rel: float = 1e-5,
+        tier1_topk_dr: int = 32,
+        tier1_topk_spectral: int = 32,
+        tier2_survivor_size: int = 32,
+        tier3_top: int = 24,
+        tier3_random: int = 8,
+        deflation_macro_action: bool = True,
     ):
         self.env_id = env_id
         self.scheduler = scheduler
@@ -123,11 +125,13 @@ class GraphEnv:
         self.spectral_power_iters = int(spectral_power_iters)
         self.spectral_drift_threshold = float(spectral_drift_threshold)
         self.spectral_soft_band_rel = float(spectral_soft_band_rel)
+        self.spectral_degeneracy_probe_rel = float(spectral_degeneracy_probe_rel)
         self.tier1_topk_dr = int(tier1_topk_dr)
         self.tier1_topk_spectral = int(tier1_topk_spectral)
         self.tier2_survivor_size = int(tier2_survivor_size)
         self.tier3_top = int(tier3_top)
         self.tier3_random = int(tier3_random)
+        self.deflation_macro_action = bool(deflation_macro_action)
         self.rl_variant = str(rl_variant)
         self.compute_spectral_each_step = bool(compute_spectral_each_step)
         self.incremental_observation = bool(incremental_observation)
@@ -165,6 +169,9 @@ class GraphEnv:
         self._eye_mask: Optional[np.ndarray] = None
         self._spectral_tracker: Optional[SpectralTracker] = None
         self._shaper: Optional[PotentialShaper] = None
+        # Reward earned by a deflation batch that ran during reset, held over to
+        # the first step so the episode return stays complete.
+        self._pending_reward: float = 0.0
         self._last_diagnostics: Dict[str, Any] = {}
         self._episode_init_metadata: Dict[str, Any] = default_path_init_metadata(0)
 
@@ -208,10 +215,54 @@ class GraphEnv:
             power_iters=self.spectral_power_iters,
             drift_threshold=self.spectral_drift_threshold,
             soft_band_rel=self.spectral_soft_band_rel,
+            degeneracy_probe_rel=self.spectral_degeneracy_probe_rel,
         )
         self._shaper = PotentialShaper(alpha1=self.reward_alpha_1, gamma=self.shaping_gamma)
         self._shaper.reset(self._spectral_tracker)
         return self._spectral_tracker.get_spectral_features()
+
+    def _reset_finalize(
+        self,
+        spectral_tuple: Tuple[float, float, float, np.ndarray, np.ndarray, np.ndarray, float, int, np.ndarray],
+    ) -> GraphObservation:
+        """Seed every `current_*` field from a fresh tracker, then deflate.
+
+        The seeding has to happen before the deflation batch runs, because the
+        batch scores its edges against these values as the pre-edge state.
+        """
+        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_tuple
+        self.current_lambda2 = float(lambda2)
+        self.current_lambda3 = float(lambda3)
+        self.current_lambda4 = float(lambda4)
+        self.current_rg = float(rg)
+        self.current_multiplicity = int(mult)
+        self.current_evecs = evecs.copy()
+        self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
+        self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
+        self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
+        self.current_P_min = (
+            self._spectral_tracker.get_P_min()
+            if self._spectral_tracker is not None
+            else 0.0
+        )
+
+        # An episode can initialize straight onto a multiplicity plateau
+        # (backbone init especially), so deflate before the policy sees anything.
+        m_before = edge_count(self.adj)
+        self._pending_reward = self._run_deflation_batch()
+        if edge_count(self.adj) != m_before:
+            spectral_cache = (
+                self.current_lambda2,
+                self.current_lambda3,
+                self.current_lambda4,
+                self.current_phi2,
+                self.current_phi3,
+                self.current_phi4,
+                self.current_evecs,
+            )
+        else:
+            spectral_cache = (lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs)
+        return self._build_observation(spectral_cache=spectral_cache)
 
     def _compute_all_pairs_shortest_path(self, adj: np.ndarray) -> np.ndarray:
         n = adj.shape[0]
@@ -378,17 +429,7 @@ class GraphEnv:
             self.episode_len = 0
             if self.incremental_observation:
                 self._initialize_incremental_state()
-            spectral_tuple = self._init_spectral_tracker()
-            lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_tuple
-            self.current_rg = float(rg)
-            self.current_multiplicity = int(mult)
-            self.current_evecs = evecs.copy()
-            self.current_P_min = (
-                self._spectral_tracker.get_P_min()
-                if self._spectral_tracker is not None
-                else 0.0
-            )
-            return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
+            return self._reset_finalize(self._init_spectral_tracker())
 
         self.adj = build_path_adjacency(self.n)
         self._episode_init_metadata = normalize_init_metadata(
@@ -400,20 +441,9 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        spectral_tuple = self._init_spectral_tracker()
-        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_tuple
-        self.current_rg = float(rg)
-        self.current_multiplicity = int(mult)
-        self.current_evecs = evecs.copy()
-        # Seed P_min from the tracker, as the backbone branch above does.
-        # Left at 0.0 the first step of the episode would score
-        # Delta P_min = P_min_new - 0 instead of a true delta.
-        self.current_P_min = (
-            self._spectral_tracker.get_P_min()
-            if self._spectral_tracker is not None
-            else 0.0
-        )
-        return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
+        # _reset_finalize seeds P_min from the tracker; left at 0.0 the first
+        # step would score Delta P_min = P_min_new - 0 instead of a true delta.
+        return self._reset_finalize(self._init_spectral_tracker())
 
     def reset_with_target(
         self,
@@ -458,17 +488,7 @@ class GraphEnv:
         self.episode_len = 0
         if self.incremental_observation:
             self._initialize_incremental_state()
-        spectral_tuple = self._init_spectral_tracker()
-        lambda2, lambda3, lambda4, phi2, phi3, phi4, rg, mult, evecs = spectral_tuple
-        self.current_rg = float(rg)
-        self.current_multiplicity = int(mult)
-        self.current_evecs = evecs.copy()
-        self.current_P_min = (
-            self._spectral_tracker.get_P_min()
-            if self._spectral_tracker is not None
-            else 0.0
-        )
-        return self._build_observation(spectral_cache=(lambda2, lambda3, lambda4, phi2, phi3, phi4, evecs))
+        return self._reset_finalize(self._init_spectral_tracker())
 
     def _build_observation(
         self,
@@ -616,6 +636,150 @@ class GraphEnv:
             rho_current=rho_current,
         )
 
+    # ------------------------------------------------------------------ #
+    #  Reward and the deterministic r-1 deflation macro-action
+    # ------------------------------------------------------------------ #
+
+    def _blend_reward(self, delta_l2: float, delta_rg: float, delta_P_min: float) -> float:
+        """r_t = α₁·Δλ₂/n + α₂·η_R·ΔR_G/n² + α₃·η_P·ΔP_min.
+
+        All three deltas arrive already oriented so that positive = improvement.
+        """
+        nf = float(max(1, self.n))
+        return (
+            float(self.reward_alpha_1) * (delta_l2 / nf)
+            + float(self.reward_alpha_2) * self._effective_eta() * delta_rg / (nf * nf)
+            + float(self.reward_alpha_3) * float(self.reward_eta_p) * delta_P_min
+        )
+
+    def _commit_edge(self, i: int, j: int, *, z: Optional[np.ndarray] = None) -> float:
+        """Add one edge through the tracker and return its blended reward.
+
+        Used by the deflation macro-action, which adds edges that were not
+        policy decisions; `step` keeps its own inlined copy of this sequence
+        because it also serves the non-spectral lite_v2 path.
+        """
+        old_lambda2 = float(self.current_lambda2)
+        old_rg = float(self.current_rg)
+        old_P_min = float(self.current_P_min)
+
+        adj_row_i_before = self.adj[i].astype(np.int64, copy=True)
+        adj_row_j_before = self.adj[j].astype(np.int64, copy=True)
+        common_neighbors = np.flatnonzero(
+            np.logical_and(adj_row_i_before > 0, adj_row_j_before > 0)
+        ).astype(np.int64, copy=False)
+
+        self.adj[i, j] = 1
+        self.adj[j, i] = 1
+        self.episode_len += 1
+        if self.incremental_observation:
+            self._update_incremental_state_after_add(
+                i=i,
+                j=j,
+                adj_row_i_before=adj_row_i_before,
+                adj_row_j_before=adj_row_j_before,
+                common_neighbors=common_neighbors,
+            )
+
+        self._spectral_tracker.add_edge(i, j, z=z)
+        l2, l3, l4, phi2, phi3, phi4, rg, mult, evecs = (
+            self._spectral_tracker.get_spectral_features()
+        )
+        self.current_lambda2 = float(l2)
+        self.current_lambda3 = float(l3)
+        self.current_lambda4 = float(l4)
+        self.current_rg = float(rg)
+        self.current_multiplicity = int(mult)
+        self.current_evecs = evecs.copy()
+        self.current_phi2 = np.asarray(phi2, dtype=np.float64).copy()
+        self.current_phi3 = np.asarray(phi3, dtype=np.float64).copy()
+        self.current_phi4 = np.asarray(phi4, dtype=np.float64).copy()
+
+        new_P_min = self._spectral_tracker.get_P_min()
+        reward = self._blend_reward(
+            delta_l2=float(l2) - old_lambda2,
+            delta_rg=old_rg - float(rg),
+            delta_P_min=new_P_min - old_P_min,
+        )
+        self.current_P_min = new_P_min
+
+        if self._shaper is not None:
+            reward += self._shaper.step(self._spectral_tracker)
+        return reward
+
+    def _run_deflation_batch(self) -> float:
+        """Collapse mult(λ₂) to 1 with the MaxVol-selected r-1 edge batch.
+
+        This is env dynamics, not a policy decision: while r > 1 every candidate
+        moves λ₂ by exactly zero, so there is nothing for the policy to
+        discriminate on. Running the batch here means the policy only ever
+        observes simple-λ₂ states, which is what "move to mult(λ₂) = 1" means.
+        The batch's reward is folded into whichever step triggered it.
+        """
+        tracker = self._spectral_tracker
+        if not self.deflation_macro_action or tracker is None or self.rl_variant != "full":
+            return 0.0
+
+        total = 0.0
+        batches = 0
+        # A completed batch always lands at r = 1, so this re-enters only when
+        # one was cut short by the edge budget; the bound is belt-and-braces
+        # against a batch that neither progresses nor reports failure.
+        while tracker.multiplicity > 1 and batches < self.n:
+            batches += 1
+            budget = self.m_target - edge_count(self.adj)
+            if budget <= 0:
+                break
+            pair_i, pair_j, pair_is_nonedge, _ = self._get_pair_arrays()
+            plan = plan_deflation_batch(
+                tracker=tracker,
+                pair_i=pair_i,
+                pair_j=pair_j,
+                pair_is_nonedge=pair_is_nonedge,
+                n=self.n,
+                tier1_topk_dr=self.tier1_topk_dr,
+                tier1_topk_spectral=self.tier1_topk_spectral,
+            )
+            if plan is None or plan.edges.shape[0] == 0:
+                break
+
+            take = min(int(plan.edges.shape[0]), budget)
+            tracker.begin_deflation_batch(take)
+            basis_epoch = tracker.z_accum_epoch
+            committed = 0
+            for idx in range(take):
+                i, j = int(plan.edges[idx, 0]), int(plan.edges[idx, 1])
+                total += self._commit_edge(i, j, z=plan.z_columns[idx])
+                committed += 1
+                if not tracker.batch_active or tracker.z_accum_epoch != basis_epoch:
+                    # Either the tracker closed the batch (a step did not land
+                    # the predicted r, so it aborted) or it re-anchored and
+                    # re-drew the frozen basis mid-batch. The plan's remaining
+                    # edges were chosen for a cascade property they only have in
+                    # the basis that just went away, and their z columns are no
+                    # longer coordinates in it -- so stop and let the while loop
+                    # re-plan from the current state rather than commit them.
+                    break
+            if tracker.batch_active:
+                # Batch left open: cut short by the budget, or by a re-anchor
+                # that did not itself close it. Close it so any deferred exact
+                # anchor is taken and the frozen basis is released.
+                tracker.end_deflation_batch()
+
+            self._last_diagnostics.update(
+                {
+                    "deflation_r": plan.r,
+                    "deflation_edges": committed,
+                    "deflation_cond_R": plan.cond_R,
+                    "deflation_pool_size": plan.pool_size,
+                    "deflation_used_full_pool": plan.used_full_pool,
+                    "deflation_ok": bool(tracker.last_deflation_ok),
+                }
+            )
+            if not tracker.last_deflation_ok:
+                break
+        return total
+
     def step(
         self,
         action_pair: Tuple[int, int],
@@ -687,23 +851,40 @@ class GraphEnv:
             delta_P_min = float(new_P_min - old_P_min)
             self.current_P_min = new_P_min
 
-            eta_R = self._effective_eta()
-            eta_P = float(self.reward_eta_p)
-
-            alpha1 = float(self.reward_alpha_1)
-            alpha2 = float(self.reward_alpha_2)
-            alpha3 = float(self.reward_alpha_3)
-
-            reward_l2 = delta_l2 / nf
-            reward_rg = eta_R * delta_rg / (nf * nf)
-            reward_pmin = eta_P * delta_P_min
-
-            reward = alpha1 * reward_l2 + alpha2 * reward_rg + alpha3 * reward_pmin
+            reward = self._blend_reward(
+                delta_l2=delta_l2,
+                delta_rg=delta_rg,
+                delta_P_min=delta_P_min,
+            )
 
             shaping_reward = 0.0
             if self._shaper is not None and self._spectral_tracker is not None:
                 shaping_reward = self._shaper.step(self._spectral_tracker)
                 reward += shaping_reward
+
+            # If the policy's edge landed the graph on a multiplicity plateau,
+            # deflate back to a simple λ₂ before the next observation is built.
+            # It consumes edge budget, so done and the terminal λ₂ settle after.
+            m_before_deflation = edge_count(self.adj)
+            reward += self._run_deflation_batch()
+            deflated = edge_count(self.adj) != m_before_deflation
+            done = edge_count(self.adj) >= self.m_target
+
+            if deflated:
+                new_lambda2 = float(self.current_lambda2)
+                spectral_cache = (
+                    self.current_lambda2,
+                    self.current_lambda3,
+                    self.current_lambda4,
+                    self.current_phi2,
+                    self.current_phi3,
+                    self.current_phi4,
+                    self.current_evecs,
+                )
+            else:
+                spectral_cache = (
+                    new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_evecs
+                )
 
             if self._spectral_tracker is not None:
                 k_remaining = max(0, self.m_target - edge_count(self.adj))
@@ -713,9 +894,7 @@ class GraphEnv:
             if done:
                 # Terminal bonus based on final λ₂
                 reward += self.terminal_bonus_coef * (new_lambda2 / nf)
-            obs = self._build_observation(
-                spectral_cache=(new_lambda2, new_lambda3, new_lambda4, phi2, phi3, phi4, new_evecs)
-            )
+            obs = self._build_observation(spectral_cache=spectral_cache)
             terminal_lambda2_norm = (new_lambda2 / nf) if done else None
             terminal_lambda2 = float(new_lambda2) if done else None
         else:
@@ -739,6 +918,9 @@ class GraphEnv:
             obs = self._build_observation()
 
         reward += float(extra_reward)
+        # Carried over from a deflation batch that ran during reset.
+        reward += self._pending_reward
+        self._pending_reward = 0.0
         self.episode_return += reward
 
         info: Dict = {
@@ -768,6 +950,7 @@ class GraphEnv:
             "m_target": self.m_target,
             "episode_return": self.episode_return,
             "episode_len": self.episode_len,
+            "pending_reward": self._pending_reward,
             "current_lambda2": self.current_lambda2,
             "current_lambda3": self.current_lambda3,
             "current_lambda4": self.current_lambda4,
@@ -800,6 +983,7 @@ class GraphEnv:
         self.m_target = int(state["m_target"])
         self.episode_return = float(state["episode_return"])
         self.episode_len = int(state["episode_len"])
+        self._pending_reward = float(state.get("pending_reward", 0.0))
         self.current_lambda2 = float(state["current_lambda2"])
         self.current_lambda3 = float(state["current_lambda3"])
         self.current_lambda4 = float(state.get("current_lambda4", 0.0))
@@ -874,8 +1058,8 @@ class VectorGraphEnvManager:
         reward_alpha: float = 0.5,
         reward_eta: float = 1.0,
         reward_alpha_1: float = 0.15,
-        reward_alpha_2: float = 0.70,
-        reward_alpha_3: float = 0.15,
+        reward_alpha_2: float = 0.15,
+        reward_alpha_3: float = 0.70,
         reward_eta_p: float = 1.0,
         shaping_gamma: float = 0.99,
         spectral_oversample: int = 3,
@@ -883,11 +1067,13 @@ class VectorGraphEnvManager:
         spectral_power_iters: int = 4,
         spectral_drift_threshold: float = 1e-8,
         spectral_soft_band_rel: float = 1e-2,
-        tier1_topk_dr: int = 192,
-        tier1_topk_spectral: int = 64,
-        tier2_survivor_size: int = 64,
-        tier3_top: int = 48,
-        tier3_random: int = 16,
+        spectral_degeneracy_probe_rel: float = 1e-5,
+        tier1_topk_dr: int = 32,
+        tier1_topk_spectral: int = 32,
+        tier2_survivor_size: int = 32,
+        tier3_top: int = 24,
+        tier3_random: int = 8,
+        deflation_macro_action: bool = True,
     ):
         if init_mode not in {"path", "backbone"}:
             raise ValueError(f"Unsupported init_mode: {init_mode}")
@@ -927,11 +1113,13 @@ class VectorGraphEnvManager:
                 spectral_power_iters=spectral_power_iters,
                 spectral_drift_threshold=spectral_drift_threshold,
                 spectral_soft_band_rel=spectral_soft_band_rel,
+                spectral_degeneracy_probe_rel=spectral_degeneracy_probe_rel,
                 tier1_topk_dr=tier1_topk_dr,
                 tier1_topk_spectral=tier1_topk_spectral,
                 tier2_survivor_size=tier2_survivor_size,
                 tier3_top=tier3_top,
                 tier3_random=tier3_random,
+                deflation_macro_action=deflation_macro_action,
             )
             for i in range(num_envs)
         ]

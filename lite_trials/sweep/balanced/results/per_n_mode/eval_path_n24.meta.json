@@ -1,0 +1,64 @@
+{
+  "config": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\lite_config.yaml",
+  "checkpoints": [
+    {
+      "best": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\sweep\\balanced\\checkpoints\\best.pt"
+    }
+  ],
+  "n_values": [
+    24
+  ],
+  "densities": [
+    0.00395256917,
+    0.075098814229,
+    0.146245059289,
+    0.217391304348,
+    0.288537549407,
+    0.359683794466,
+    0.430830039526,
+    0.498023715415,
+    0.569169960474,
+    0.640316205534,
+    0.711462450593,
+    0.782608695652,
+    0.853754940711,
+    0.924901185771,
+    0.99604743083
+  ],
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "determinism": {
+    "strict": false,
+    "seed": 1234,
+    "num_threads": 2
+  },
+  "variant": {
+    "name": "full"
+  },
+  "lite_v2": {
+    "actor_topk_ratio": 0.12,
+    "actor_topk_min": 32,
+    "actor_topk_max": 160,
+    "selector_hidden_dim": 64,
+    "selector_layers": 2,
+    "selector_learning_rate": 0.0003,
+    "selector_weight_decay": 0.0,
+    "selector_max_grad_norm": 1.0,
+    "selector_update_every_env_steps": 8,
+    "teacher_weight_lambda2": 0.7,
+    "teacher_weight_lambda3": 0.3,
+    "reward_shaping_coef": 0.02,
+    "reward_weight_lambda2": 0.7,
+    "reward_weight_lambda3": 0.3,
+    "fast_inference": true,
+    "use_er_teacher": false
+  },
+  "use_fast_inference": false,
+  "init_mode": "path",
+  "backbone_init": null
+}

@@ -1,0 +1,81 @@
+{
+  "config": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\lite_config.yaml",
+  "checkpoints": [
+    {
+      "best": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\sweep\\resistance_only\\checkpoints\\best.pt"
+    }
+  ],
+  "n_values": [
+    64
+  ],
+  "densities": [
+    0.00051203277,
+    0.071684587814,
+    0.143369175627,
+    0.214541730671,
+    0.285714285714,
+    0.357398873528,
+    0.428571428571,
+    0.500256016385,
+    0.571428571429,
+    0.642601126472,
+    0.714285714286,
+    0.785458269329,
+    0.856630824373,
+    0.928315412186,
+    0.99948796723
+  ],
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "determinism": {
+    "strict": false,
+    "seed": 1234,
+    "num_threads": 2
+  },
+  "variant": {
+    "name": "full"
+  },
+  "lite_v2": {
+    "actor_topk_ratio": 0.12,
+    "actor_topk_min": 32,
+    "actor_topk_max": 160,
+    "selector_hidden_dim": 64,
+    "selector_layers": 2,
+    "selector_learning_rate": 0.0003,
+    "selector_weight_decay": 0.0,
+    "selector_max_grad_norm": 1.0,
+    "selector_update_every_env_steps": 8,
+    "teacher_weight_lambda2": 0.7,
+    "teacher_weight_lambda3": 0.3,
+    "reward_shaping_coef": 0.02,
+    "reward_weight_lambda2": 0.7,
+    "reward_weight_lambda3": 0.3,
+    "fast_inference": true,
+    "use_er_teacher": false
+  },
+  "use_fast_inference": false,
+  "init_mode": "backbone",
+  "backbone_init": {
+    "routing_mode": "window",
+    "rho_very_low": 0.05,
+    "rho_low_mix_end": 0.1,
+    "rho_low": 0.5,
+    "rho_high": 0.75,
+    "cayley_samples": 500,
+    "cayley_degree_slack": 0,
+    "cayley_multi_index_overlap": true,
+    "cayley_enable_index4": true,
+    "cayley_index2_overlap_high": 0.6,
+    "cayley_index3_overlap_high": 0.6666666666666666,
+    "cayley_index4_overlap_low": 0.6666666666666666,
+    "cayley_spectral_backend": "cpu",
+    "cayley_eval_batch_size": 128,
+    "cayley_eval_mode": "dense",
+    "force_connected_backbone": true
+  }
+}

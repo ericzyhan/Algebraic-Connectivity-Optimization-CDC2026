@@ -267,9 +267,114 @@ def test_maxvol_precondition():
     assert np.isfinite(good), f"full pool cond(R)={good}"
     assert not np.isfinite(bad) or bad > 1e12, f"rank-1 pool cond(R)={bad}, want blow-up"
 
-    chosen = set(tr.rrqr_rank(Z)[: r - 1].tolist())
-    assert not (chosen & set(zero_rows)), "selection picked a zero-z candidate"
+    _, selected = tr.maxvol_rank(Z)
+    assert not (set(selected.tolist()) & set(zero_rows)), "MaxVol picked a zero-z candidate"
     return f"cond(R) full={good:.2e} rank-1={bad:.2e}; zero-z candidate excluded"
+
+
+def test_maxvol_dominance():
+    """MaxVol must return a dominant subset: max |Q Q[I]^-1| <= e."""
+    rng = np.random.default_rng(23)
+    e = 1.02
+    worst_ratio = 0.0
+    gains = []
+    for (k, r) in ((32, 3), (32, 5), (16, 2), (64, 7)):
+        for _ in range(20):
+            Q, _ = np.linalg.qr(rng.standard_normal((k, r)))
+            I_warm = SpectralTracker.maxvol_warm_start(Q)
+            I = SpectralTracker.maxvol(Q, e=e)
+            assert I.shape == (r,), f"MaxVol returned shape {I.shape}, want ({r},)"
+            assert len(set(I.tolist())) == r, f"MaxVol returned duplicate rows: {I}"
+
+            B = np.linalg.solve(Q[I, :].T, Q.T).T
+            worst_ratio = max(worst_ratio, float(np.abs(B).max()))
+            # ...and the volume must not be worse than the LU warm start it began from.
+            v_warm = abs(float(np.linalg.det(Q[I_warm, :])))
+            v_max = abs(float(np.linalg.det(Q[I, :])))
+            assert v_max >= v_warm - 1e-12, f"MaxVol lost volume: {v_warm:.3e} -> {v_max:.3e}"
+            if v_warm > 1e-12:
+                gains.append(v_max / v_warm)
+    assert worst_ratio <= e + 1e-9, f"dominance violated: max|B| = {worst_ratio:.6f} > {e}"
+    return (
+        f"max|Q Q[I]^-1| = {worst_ratio:.4f} <= {e}; "
+        f"mean volume gain over LU warm start = {float(np.mean(gains)):.3f}x"
+    )
+
+
+def test_maxvol_beats_rrqr_volume():
+    """maxvol_rank warm-starts from RRQR, so its subset never has less volume.
+
+    Also pins the reason that warm start exists: the standalone LU-started
+    MaxVol is only locally dominant and does sometimes finish below RRQR.
+    """
+    rng = np.random.default_rng(31)
+    tr = SpectralTracker(k24())
+    ratios = []
+    lu_losses = 0
+    r, k = 4, 24
+    for _ in range(200):
+        Z = rng.standard_normal((r, k))
+        Q, _ = np.linalg.qr(Z.T)
+        v_rrqr = abs(float(np.linalg.det(Q[tr.rrqr_rank(Z)[:r], :])))
+
+        _, selected = tr.maxvol_rank(Z)
+        v_mv = abs(float(np.linalg.det(Q[selected, :])))
+        assert v_mv >= v_rrqr - 1e-10, f"maxvol_rank below RRQR: {v_mv:.4e} < {v_rrqr:.4e}"
+        if v_rrqr > 1e-12:
+            ratios.append(v_mv / v_rrqr)
+        if abs(float(np.linalg.det(Q[SpectralTracker.maxvol(Q), :]))) < v_rrqr - 1e-10:
+            lu_losses += 1
+    return (
+        f"200 pools, maxvol_rank/RRQR volume: mean {float(np.mean(ratios)):.3f}x, "
+        f"max {max(ratios):.3f}x, min {min(ratios):.3f}x; "
+        f"LU-warm-started MaxVol would have lost to RRQR {lu_losses}/200 times"
+    )
+
+
+def test_stale_z_column_cannot_go_ragged():
+    """A z column from a basis that has since been re-drawn must be refused.
+
+    Regression: the deflation planner hands add_edge a z whose width is the
+    multiplicity frozen at plan time. If the basis is re-drawn before that
+    column is committed -- an aborted batch takes its deferred anchor
+    immediately, at a smaller r -- the width no longer matches the accumulator.
+    Appending it anyway left _z_accum_cols ragged, which surfaced only on the
+    next ordinary edge as a ValueError inside np.stack in sigma_r_accum.
+    """
+    A = k24()
+    tr = SpectralTracker(A)
+    r = tr.multiplicity
+    U = tr.U[:, :r]
+    nz = [(i, j) for i, j in itertools.combinations(range(6), 2) if not A[i, j]]
+    Z = np.array([U[i] - U[j] for i, j in nz]).T
+    order = tr.rrqr_rank(Z)
+    sel = [nz[t] for t in order[: r - 1]]
+    # A column of the frozen r=3 basis that the batch itself does not consume.
+    stale_z = Z[:, order[r - 1]].copy()
+
+    tr.begin_deflation_batch(len(sel))
+    for (i, j) in sel:
+        tr.add_edge(i, j)
+    assert tr.multiplicity == 1, f"batch did not reach r=1 (r={tr.multiplicity})"
+
+    tr._reset_z_accum()  # what an anchor does: re-draw the basis at the new r
+    assert tr._z_accum_r == 1 and stale_z.shape[0] == r, "test fixture is not stale"
+
+    rest = [e for e in nz if e not in sel]
+    tr.add_edge(*rest[0], z=stale_z)  # stale width r, accumulator is width 1
+    tr.add_edge(*rest[1])             # ordinary edge, width _z_accum_r
+
+    widths = {int(c.shape[0]) for c in tr._z_accum_cols}
+    assert len(widths) <= 1, f"accumulator went ragged: widths {sorted(widths)}"
+    assert widths <= {tr._z_accum_r}, (
+        f"columns of width {sorted(widths)} in a width-{tr._z_accum_r} accumulator"
+    )
+    sigma = tr.sigma_r_accum()  # must not raise
+    assert np.isfinite(sigma), f"sigma_r_accum returned {sigma}"
+    return (
+        f"stale width-{r} z refused by a width-{tr._z_accum_r} accumulator; "
+        f"sigma_r = {sigma:.6f}"
+    )
 
 
 def test_batch_defers_exact_anchor():
@@ -356,7 +461,10 @@ TESTS = [
     test_plateau_exact,
     test_batch_deflation_cascade,
     test_batch_basis_is_frozen,
+    test_stale_z_column_cannot_go_ragged,
     test_maxvol_precondition,
+    test_maxvol_dominance,
+    test_maxvol_beats_rrqr_volume,
     test_batch_defers_exact_anchor,
     test_long_horizon_drift,
     test_cost_scaling,

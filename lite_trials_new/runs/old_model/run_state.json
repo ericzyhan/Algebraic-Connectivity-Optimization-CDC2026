@@ -1,0 +1,12 @@
+{
+  "algo": "ppo",
+  "best_eval_metric": 0.5734848484848485,
+  "elapsed_sec": 51.42311096191406,
+  "global_env_steps": 8000,
+  "init_mode": "path",
+  "last_checkpoint_path": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\old_model\\checkpoints\\step_6000.pt",
+  "phase": "phase_lite",
+  "rl_variant": "full",
+  "selector_update_idx": 0,
+  "update_idx": 7
+}

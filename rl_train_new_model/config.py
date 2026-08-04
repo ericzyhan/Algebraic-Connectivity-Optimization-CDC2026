@@ -29,26 +29,35 @@ class EnvConfig:
     terminal_bonus_coef: float = 0.2
     reward_alpha: float = 0.5
     reward_eta: float = 0.0  # 0 = auto (calibrated per n); set >0 to override
-    # alpha_2 >> alpha_1, alpha_3: -R_G is monotone submodular (optimality-gap.md S6)
-    # and Delta lambda_2 is nondifferentiable at multiplicity (theory.md S3), so the
-    # resistance term is weighted most heavily. This is a fixed ratio, not a learned
-    # ablation harness (see docs/open-questions.md Q4).
+    # alpha_3 >> alpha_1, alpha_2: the reward leans on resistance curvature
+    # (Delta p_min), with effective graph resistance (Delta R_G) and Delta lambda_2
+    # as the lighter terms. Delta lambda_2 in particular is nondifferentiable at
+    # multiplicity, and is exactly zero across a plateau. This is a fixed ratio,
+    # not a learned ablation harness.
     reward_alpha_1: float = 0.15
-    reward_alpha_2: float = 0.70
-    reward_alpha_3: float = 0.15
+    reward_alpha_2: float = 0.15
+    reward_alpha_3: float = 0.70
     reward_eta_p: float = 1.0
-    # Spectral tracker (docs/algorithm.md S1, S3, S7)
+    # Spectral tracker
     spectral_oversample: int = 3
     spectral_exact_reset_every: int = 50
     spectral_power_iters: int = 4
     spectral_drift_threshold: float = 1e-8
     spectral_soft_band_rel: float = 1e-2
-    # Tiered candidacy pipeline (docs/algorithm.md S4)
-    tier1_topk_dr: int = 192
-    tier1_topk_spectral: int = 64
-    tier2_survivor_size: int = 64
-    tier3_top: int = 48
-    tier3_random: int = 16
+    # Below this relative gap the tracked eigenvalues are closer together than
+    # the block power iteration can resolve, so multiplicity is settled by an
+    # exact eigh instead of by the tracked values.
+    spectral_degeneracy_probe_rel: float = 1e-5
+    # Tiered candidacy pipeline: Tier 1 screens to <= 64 (top 32 by |Delta R_G|
+    # union top 32 by the multispectral Fiedler score), Tier 2 refines to <= 32.
+    tier1_topk_dr: int = 32
+    tier1_topk_spectral: int = 32
+    tier2_survivor_size: int = 32
+    tier3_top: int = 24
+    tier3_random: int = 8
+    # Deterministic r-1 MaxVol deflation batch, run by the env whenever
+    # mult(lambda_2) > 1 so the policy only ever acts on a simple lambda_2.
+    deflation_macro_action: bool = True
 
 
 @dataclass
@@ -227,18 +236,20 @@ DEFAULT_CONFIG_DICT: Dict[str, Any] = {
         "dist_cap": 4,
         "terminal_bonus_coef": 0.2,
         "reward_alpha_1": 0.15,
-        "reward_alpha_2": 0.70,
-        "reward_alpha_3": 0.15,
+        "reward_alpha_2": 0.15,
+        "reward_alpha_3": 0.70,
         "spectral_oversample": 3,
         "spectral_exact_reset_every": 50,
         "spectral_power_iters": 4,
         "spectral_drift_threshold": 1e-8,
         "spectral_soft_band_rel": 1e-2,
-        "tier1_topk_dr": 192,
-        "tier1_topk_spectral": 64,
-        "tier2_survivor_size": 64,
-        "tier3_top": 48,
-        "tier3_random": 16,
+        "spectral_degeneracy_probe_rel": 1e-5,
+        "tier1_topk_dr": 32,
+        "tier1_topk_spectral": 32,
+        "tier2_survivor_size": 32,
+        "tier3_top": 24,
+        "tier3_random": 8,
+        "deflation_macro_action": True,
     },
     "model": {
         "gat_hidden_dim": 64,

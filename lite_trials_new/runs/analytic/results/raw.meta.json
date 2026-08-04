@@ -1,0 +1,23 @@
+{
+  "arm": "analytic",
+  "label": "Analytic (exact secular)",
+  "package": "analytic_tractable_test_deepseek",
+  "repo_root": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026",
+  "config": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\configs\\analytic.yaml",
+  "checkpoint": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\analytic\\checkpoints\\best.pt",
+  "n_values": [
+    12,
+    16,
+    32,
+    64
+  ],
+  "points_per_n": 10,
+  "repeats": 3,
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "total_rows": 240,
+  "eval_wall_sec": 260.7706718444824
+}

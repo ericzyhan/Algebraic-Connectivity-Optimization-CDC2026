@@ -38,6 +38,7 @@ class SpectralTracker:
         eps_rel: float = 1e-10,
         drift_threshold: float = 1e-8,
         soft_band_rel: float = 1e-2,
+        degeneracy_probe_rel: float = 1e-5,
     ):
         self.n = int(adj.shape[0])
         if self.n < 2:
@@ -51,6 +52,7 @@ class SpectralTracker:
         self.eps_rel = float(eps_rel)
         self.drift_threshold = float(drift_threshold)
         self.soft_band_rel = float(soft_band_rel)
+        self.degeneracy_probe_rel = float(degeneracy_probe_rel)
 
         # Populated by _full_recompute / _detect_multiplicity below.
         self.multiplicity = 1
@@ -71,6 +73,7 @@ class SpectralTracker:
         self.mu2 = 0.0
         self.mu3 = float("inf")
         self.soft_degenerate = False
+        self.unresolved_degeneracy = False
 
         # Per-edge secular diagnostics (also feed the lightweight certificates).
         self.last_secular_delta: Optional[float] = None
@@ -87,6 +90,7 @@ class SpectralTracker:
         self._z_accum_cols: List[np.ndarray] = []
         self._z_accum_U: Optional[np.ndarray] = None
         self._z_accum_r: int = 1
+        self._z_accum_epoch: int = 0
 
         # Deterministic r-1 deflation batch (step 2 of the algorithm).
         self._batch_active: bool = False
@@ -176,8 +180,16 @@ class SpectralTracker:
         self.mu2 = mu2
         self.mu3 = float(self.subspace_evals[r]) if r < q_avail else float("inf")
         denom = max(self.mu2, 1e-12)
-        self.soft_degenerate = bool(
-            np.isfinite(self.mu3) and (self.mu3 - self.mu2) < self.soft_band_rel * denom
+        gap = self.mu3 - self.mu2
+        self.soft_degenerate = bool(np.isfinite(self.mu3) and gap < self.soft_band_rel * denom)
+        # Separate, much tighter band: below it the tracked gap is smaller than
+        # what the block power iteration can actually resolve (~1e-6 relative),
+        # so r is not decidable from these eigenvalues at the 1e-10 tolerance
+        # above. add_edge escalates to an exact spectrum rather than guessing --
+        # without that, a true plateau reads as r=1 and is only ever visible
+        # immediately after a periodic anchor.
+        self.unresolved_degeneracy = bool(
+            np.isfinite(self.mu3) and gap <= self.degeneracy_probe_rel * denom
         )
 
         if r >= q_avail and q_avail < self.n - 1:
@@ -195,6 +207,19 @@ class SpectralTracker:
         self._z_accum_r = r
         self._z_accum_U = self.U[:, :r].copy()
         self._z_accum_cols = []
+        self._z_accum_epoch += 1
+
+    @property
+    def z_accum_epoch(self) -> int:
+        """Bumped every time the accumulator basis is re-drawn.
+
+        A caller holding z columns it computed against an earlier basis (the
+        deflation batch planner is the only one) compares this against the
+        value it saw at begin_deflation_batch to tell that its columns went
+        stale mid-batch -- which happens whenever an exact anchor lands
+        between planning and commit.
+        """
+        return self._z_accum_epoch
 
     def sigma_r_accum(self) -> float:
         if not self._z_accum_cols:
@@ -381,17 +406,18 @@ class SpectralTracker:
         self.last_secular_exact = bool(exact)
 
     # ------------------------------------------------------------------ #
-    #  Tier 2 (r>1): RRQR ranking only -- no local swap refinement, per
-    #  project decision: the GNN policy keeps the final pick among the
-    #  RRQR-ranked survivors instead of a deterministic macro-action.
+    #  Tier 2 (r>1): RRQR ranking, then MaxVol refinement. RRQR alone is
+    #  greedy and only guarantees a rank-revealing ordering; MaxVol polishes
+    #  the chosen r-subset to (near-)maximal volume, which is what makes the
+    #  deterministic r-1 deflation batch well posed.
     # ------------------------------------------------------------------ #
 
     def rrqr_rank(self, Z: np.ndarray) -> np.ndarray:
         """Column-pivoted QR ranking of Z (r x k), most-important column first.
 
-        No swap refinement is applied (see docs/CLAUDE.md decision log) --
-        this is the base RRQR ranking only, handed to candidacy.py to shortlist
-        survivors that the policy then chooses among.
+        This is the base ordering only. It is still used to rank the tail of
+        the survivor list (everything MaxVol did not select), and as the
+        fallback ordering when the pool is too small for MaxVol to run.
         """
         if Z.shape[1] == 0:
             return np.zeros((0,), dtype=np.int64)
@@ -424,6 +450,99 @@ class SpectralTracker:
         _, R = np.linalg.qr(Z.T)
         return float(np.linalg.cond(R))
 
+    @staticmethod
+    def maxvol_warm_start(Q: np.ndarray) -> np.ndarray:
+        """LU-with-partial-pivoting warm start for MaxVol.
+
+        Partial pivoting already hoists large-magnitude rows to the top, so the
+        first r pivots of P Q = L U are a cheap near-dominant starting set and
+        MaxVol only has to polish it. Q = P L U, hence row m of P^T Q is row
+        argmax(P[:, m]) of Q -- that argmax over the first r columns of P is
+        exactly the "indices where a 1 appears in the first r rows" of the
+        algorithm write-up.
+        """
+        from scipy.linalg import lu
+
+        k, r = Q.shape
+        if k < r:
+            raise ValueError(f"MaxVol warm start needs k >= r, got Q with shape {Q.shape}")
+        P, _, _ = lu(Q)
+        return np.argmax(P[:, :r], axis=0).astype(np.int64)
+
+    @staticmethod
+    def maxvol(
+        Q: np.ndarray,
+        I_init: Optional[np.ndarray] = None,
+        e: float = 1.02,
+        max_iter: int = 100,
+    ) -> np.ndarray:
+        """Goreinov-Tyrtyshnikov MaxVol: r rows of Q (k x r) of near-maximal volume.
+
+        Returns I with every entry of B = Q Q[I]^-1 satisfying |B_ab| <= e. That
+        dominance property is the certificate: it bounds how far Q[I] is from the
+        true maximum-volume submatrix, and hence bounds its conditioning. Since
+        det((Z^T)_I) = det(Q_I) det(R), maximizing the volume of Q's rows
+        maximizes the volume of Z^T's rows -- which is precisely why R may be
+        tossed after the thin QR (see deflation_pool_conditioning).
+
+        B is recomputed by a solve each sweep rather than rank-1 updated: the
+        pool here is the screened shortlist (k <= 32) and r is the multiplicity
+        (small), so O(k r^2) per sweep is already negligible and a fresh solve
+        is the better-conditioned of the two.
+        """
+        Q = np.asarray(Q, dtype=np.float64)
+        if Q.ndim != 2:
+            raise ValueError(f"MaxVol expects a 2-D Q, got shape {Q.shape}")
+        k, r = Q.shape
+        if r == 0 or k < r:
+            return np.arange(min(k, r), dtype=np.int64)
+
+        if I_init is None:
+            I = SpectralTracker.maxvol_warm_start(Q)
+        else:
+            I = np.asarray(I_init, dtype=np.int64).copy()
+            if I.shape != (r,):
+                raise ValueError(f"I_init must have shape ({r},), got {I.shape}")
+
+        for _ in range(int(max_iter)):
+            try:
+                # B = Q Q[I]^-1, solved rather than inverted.
+                B = np.linalg.solve(Q[I, :].T, Q.T).T
+            except np.linalg.LinAlgError:
+                # Singular starting minor: the pool cannot span the eigenspace,
+                # which deflation_pool_conditioning is the designated check for.
+                break
+            row, col = np.unravel_index(int(np.argmax(np.abs(B))), B.shape)
+            if abs(float(B[row, col])) <= e:
+                break
+            I[col] = row
+        return I
+
+    def maxvol_rank(self, Z: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Order the columns of Z (r x k) MaxVol-selected-first, RRQR for the tail.
+
+        Returns (order, selected), where `selected` is the MaxVol r-subset and
+        `order` is a full ranking of all k columns with those r at the head.
+        Falls back to the plain RRQR ordering when k < r, i.e. when the pool is
+        too small for a volume-maximal r-subset to exist at all.
+
+        MaxVol is warm-started from the RRQR pivots rather than its own LU
+        default: the pivots are already in hand here for the tail ordering, and
+        every MaxVol swap multiplies |det| by a factor > e > 1, so starting from
+        RRQR makes the result provably no worse than RRQR. The LU warm start
+        remains the default for a standalone `maxvol` call, where no pivoted QR
+        has been paid for -- but it is only a local optimum, and on random pools
+        it does sometimes finish below the greedy RRQR pick.
+        """
+        r, k = Z.shape
+        piv = self.rrqr_rank(Z)
+        if k < r or r == 0:
+            return piv, piv[: min(k, r)]
+        Q, _ = np.linalg.qr(Z.T)  # thin QR: Q is (k, r); R is tossed
+        selected = self.maxvol(Q, I_init=piv[:r])
+        tail = piv[~np.isin(piv, selected)]
+        return np.concatenate([selected, tail]).astype(np.int64), selected.astype(np.int64)
+
     def begin_deflation_batch(self, size: int) -> None:
         """Freeze the lambda_2 eigenbasis for the duration of an r-1 edge batch.
 
@@ -440,6 +559,10 @@ class SpectralTracker:
         self._batch_expected_r = int(self.multiplicity)
         self.last_deflation_ok = True
         self._reset_z_accum()
+
+    @property
+    def batch_active(self) -> bool:
+        return self._batch_active
 
     def end_deflation_batch(self) -> None:
         self._batch_active = False
@@ -603,7 +726,17 @@ class SpectralTracker:
         self.p = self.p + dp
         self.P_min = float(np.min(self.p))
 
-        self._z_accum_cols.append(z_before)
+        if z_before.shape[0] == self._z_accum_r:
+            self._z_accum_cols.append(z_before)
+        else:
+            # A caller-supplied z from a basis this tracker has since re-drawn
+            # (its width is the multiplicity that was frozen when the batch was
+            # planned, not the current one). It is not a coordinate vector in
+            # the live basis, so it cannot join the columns already collected --
+            # sigma_r across mixed bases is meaningless, and the length mismatch
+            # would surface only later, as a ragged stack. Void the accumulator;
+            # Phi stays 0 until a fresh batch refills it.
+            self._reset_z_accum()
 
         self.steps_since_exact += 1
         drift = self._cheap_drift(k_sync)
@@ -629,6 +762,15 @@ class SpectralTracker:
                 self.subspace_evals[0] = mu2_before
 
         r_after = self._detect_multiplicity()
+
+        if not did_exact and self.unresolved_degeneracy and not self._batch_active:
+            # Tracked gap is below the power iteration's own resolution, so the
+            # r just detected is not trustworthy. Settle it exactly. Skipped
+            # mid-batch, where eigh would re-draw the frozen degenerate basis --
+            # the deferral path below already covers that case.
+            self._full_recompute()
+            r_after = self._detect_multiplicity()
+            did_exact = True
 
         if self._batch_active:
             expected = (self._batch_expected_r or r_before) - 1
@@ -707,6 +849,7 @@ class SpectralTracker:
             "eps_rel": self.eps_rel,
             "drift_threshold": self.drift_threshold,
             "soft_band_rel": self.soft_band_rel,
+            "degeneracy_probe_rel": self.degeneracy_probe_rel,
             "steps_since_exact": self.steps_since_exact,
             "drift_residual": self.drift_residual,
             "Lplus": self.Lplus.copy(),
@@ -719,12 +862,14 @@ class SpectralTracker:
             "mu2": self.mu2,
             "mu3": self.mu3,
             "soft_degenerate": self.soft_degenerate,
+            "unresolved_degeneracy": self.unresolved_degeneracy,
             "RG": self.RG,
             "p": self.p.copy(),
             "P_min": self.P_min,
             "z_accum_cols": [c.copy() for c in self._z_accum_cols],
             "z_accum_U": self._z_accum_U.copy() if self._z_accum_U is not None else None,
             "z_accum_r": self._z_accum_r,
+            "z_accum_epoch": self._z_accum_epoch,
             "batch_active": self._batch_active,
             "batch_remaining": self._batch_remaining,
             "batch_expected_r": self._batch_expected_r,
@@ -742,6 +887,7 @@ class SpectralTracker:
         obj.eps_rel = float(state["eps_rel"])
         obj.drift_threshold = float(state["drift_threshold"])
         obj.soft_band_rel = float(state["soft_band_rel"])
+        obj.degeneracy_probe_rel = float(state.get("degeneracy_probe_rel", 1e-5))
         obj.steps_since_exact = int(state["steps_since_exact"])
         obj.drift_residual = float(state["drift_residual"])
         obj.adj = state["adj"].copy()
@@ -755,6 +901,7 @@ class SpectralTracker:
         obj.mu2 = float(state["mu2"])
         obj.mu3 = float(state["mu3"])
         obj.soft_degenerate = bool(state["soft_degenerate"])
+        obj.unresolved_degeneracy = bool(state.get("unresolved_degeneracy", False))
         obj.RG = float(state["RG"])
         obj.P_min = float(state["P_min"])
         if state.get("p") is not None:
@@ -766,6 +913,7 @@ class SpectralTracker:
             state["z_accum_U"].copy() if state.get("z_accum_U") is not None else None
         )
         obj._z_accum_r = int(state.get("z_accum_r", obj.multiplicity))
+        obj._z_accum_epoch = int(state.get("z_accum_epoch", 0))
         obj._batch_active = bool(state.get("batch_active", False))
         obj._batch_remaining = int(state.get("batch_remaining", 0))
         obj._batch_expected_r = state.get("batch_expected_r")

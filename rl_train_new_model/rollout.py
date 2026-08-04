@@ -313,11 +313,13 @@ def main() -> None:
         spectral_power_iters=cfg.env.spectral_power_iters,
         spectral_drift_threshold=cfg.env.spectral_drift_threshold,
         spectral_soft_band_rel=cfg.env.spectral_soft_band_rel,
+        spectral_degeneracy_probe_rel=cfg.env.spectral_degeneracy_probe_rel,
         tier1_topk_dr=cfg.env.tier1_topk_dr,
         tier1_topk_spectral=cfg.env.tier1_topk_spectral,
         tier2_survivor_size=cfg.env.tier2_survivor_size,
         tier3_top=cfg.env.tier3_top,
         tier3_random=cfg.env.tier3_random,
+        deflation_macro_action=cfg.env.deflation_macro_action,
     )
 
     init_mode = args.init_mode if args.init_mode is not None else cfg.init.mode

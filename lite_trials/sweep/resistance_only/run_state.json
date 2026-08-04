@@ -1,7 +1,7 @@
 {
   "algo": "ppo",
   "best_eval_metric": 0.8494359876232601,
-  "elapsed_sec": 133.69643425941467,
+  "elapsed_sec": 120.01010346412659,
   "global_env_steps": 20000,
   "init_mode": "path",
   "last_checkpoint_path": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials\\sweep\\resistance_only\\checkpoints\\last.pt",
