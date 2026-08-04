@@ -10,7 +10,7 @@
     "metrics_path": "C:\\Users\\erich\\Documents\\AFRL\\Algebraic-Connectivity-Optimization-CDC2026\\lite_trials_new\\runs\\old_model\\metrics.csv",
     "max_env_steps": 20000,
     "env_overrides": {},
-    "train_wall_sec": 146.27080631256104,
+    "train_wall_sec": 138.9474802017212,
     "notes": "Baseline. Reward is Delta(lambda_2)/n + terminal bonus; no blend terms exist."
   },
   {
@@ -30,7 +30,7 @@
       "reward_eta": 0.0,
       "reward_eta_p": 1.0
     },
-    "train_wall_sec": 158.73499703407288,
+    "train_wall_sec": 130.38669443130493,
     "notes": "Full eigenbasis, exact secular root. lambda_2 tracked to ~1e-15."
   },
   {
@@ -62,7 +62,7 @@
       "tier3_random": 8,
       "deflation_macro_action": true
     },
-    "train_wall_sec": 148.19697785377502,
+    "train_wall_sec": 128.30533814430237,
     "notes": "Bottom-q subspace + block power iteration; bracketed lambda_2, flat in n."
   }
 ]
