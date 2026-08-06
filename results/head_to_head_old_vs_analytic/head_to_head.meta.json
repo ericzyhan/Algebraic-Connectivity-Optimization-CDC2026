@@ -1,0 +1,68 @@
+{
+  "name": "head_to_head_old_vs_analytic",
+  "old_csv": "C:\\Users\\avalon\\Documents\\AFRL\\Old Model\\Algebraic-Connectivity-Optimization-CDC2026\\results\\rl\\raw.csv",
+  "new_csv": "C:\\Users\\avalon\\Documents\\AFRL\\Algebraic_Connectivity_Fresh_Rebase\\Algebraic_Connectivity_Fresh_Rebase\\results\\rl_analytic\\raw.csv",
+  "tie_tol": 1e-10,
+  "matched_keys": 2560,
+  "matched_density_points_by_method_n": {
+    "RL+Backbone|n=8": 20,
+    "RL+Backbone|n=16": 94,
+    "RL+Backbone|n=32": 50,
+    "RL+Backbone|n=64": 48,
+    "RL+Backbone|n=128": 44,
+    "RL+Path|n=8": 20,
+    "RL+Path|n=16": 94,
+    "RL+Path|n=32": 50,
+    "RL+Path|n=64": 48,
+    "RL+Path|n=128": 44
+  },
+  "old": {
+    "rows": 4200,
+    "checkpoint_global_env_steps": [
+      "404000"
+    ],
+    "checkpoint_path": [
+      "/gpfs/home/zezhu/Algebraic_Connectivity/experiments/rl/runs/ppo_path_init/checkpoints/best.pt"
+    ],
+    "config_path": [
+      "/gpfs/home/zezhu/Algebraic_Connectivity/configs/rl_cpu_standard.yaml"
+    ],
+    "rl_variant": [
+      "full"
+    ],
+    "seeds": [
+      "0",
+      "1",
+      "2",
+      "3",
+      "4"
+    ]
+  },
+  "new": {
+    "rows": 5000,
+    "checkpoint_global_env_steps": [
+      "700000"
+    ],
+    "checkpoint_path": [
+      "/home/han_zy_eric/Algebraic-Connectivity-Optimization-CDC2026/experiments/rl/runs/analytic_path_init/checkpoints/best.pt"
+    ],
+    "config_path": [
+      "/home/han_zy_eric/Algebraic-Connectivity-Optimization-CDC2026/configs/rl_cpu_standard_analytic.yaml"
+    ],
+    "rl_variant": [
+      "full"
+    ],
+    "seeds": [
+      "0",
+      "1",
+      "2",
+      "3",
+      "4"
+    ]
+  },
+  "outputs": {
+    "out_matched_csv": "C:\\Users\\avalon\\Documents\\AFRL\\Algebraic_Connectivity_Fresh_Rebase\\Algebraic_Connectivity_Fresh_Rebase\\results\\head_to_head_old_vs_analytic\\head_to_head_matched.csv",
+    "out_all_points_csv": "C:\\Users\\avalon\\Documents\\AFRL\\Algebraic_Connectivity_Fresh_Rebase\\Algebraic_Connectivity_Fresh_Rebase\\results\\head_to_head_old_vs_analytic\\head_to_head_all_points.csv",
+    "out_meta": "C:\\Users\\avalon\\Documents\\AFRL\\Algebraic_Connectivity_Fresh_Rebase\\Algebraic_Connectivity_Fresh_Rebase\\results\\head_to_head_old_vs_analytic\\head_to_head.meta.json"
+  }
+}

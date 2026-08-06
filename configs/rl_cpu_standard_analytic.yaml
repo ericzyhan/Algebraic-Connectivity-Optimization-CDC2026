@@ -61,7 +61,7 @@ ppo:
   rollout_env_steps: 2048
 
 logging:
-  console_log_every_env_steps: 200
+  console_log_every_env_steps: 20000
   eval_every_env_steps: 2000
   metrics_path: experiments/rl/runs/analytic_path_init/metrics.csv
   tensorboard_dir: experiments/rl/runs/analytic_path_init/tensorboard

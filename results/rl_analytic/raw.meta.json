@@ -1,0 +1,30 @@
+{
+  "name": "rl_path_vs_backbone",
+  "in_dir": "C:\\Users\\avalon\\Documents\\AFRL\\Algebraic_Connectivity_Fresh_Rebase\\Algebraic_Connectivity_Fresh_Rebase\\results\\rl_analytic\\per_n_mode",
+  "n_values": [
+    8,
+    16,
+    32,
+    64,
+    128
+  ],
+  "total_rows": 5000,
+  "shards": [
+    "eval_backbone_n128.csv",
+    "eval_backbone_n16.csv",
+    "eval_backbone_n32.csv",
+    "eval_backbone_n64.csv",
+    "eval_backbone_n8.csv",
+    "eval_path_n128.csv",
+    "eval_path_n16.csv",
+    "eval_path_n32.csv",
+    "eval_path_n64.csv",
+    "eval_path_n8.csv"
+  ],
+  "outputs": {
+    "out_csv": "C:\\Users\\avalon\\Documents\\AFRL\\Algebraic_Connectivity_Fresh_Rebase\\Algebraic_Connectivity_Fresh_Rebase\\results\\rl_analytic\\raw.csv",
+    "out_meta": "C:\\Users\\avalon\\Documents\\AFRL\\Algebraic_Connectivity_Fresh_Rebase\\Algebraic_Connectivity_Fresh_Rebase\\results\\rl_analytic\\raw.meta.json",
+    "out_cost_csv": "C:\\Users\\avalon\\Documents\\AFRL\\Algebraic_Connectivity_Fresh_Rebase\\Algebraic_Connectivity_Fresh_Rebase\\results\\rl_analytic\\summary_cost.csv",
+    "out_quality_csv": "C:\\Users\\avalon\\Documents\\AFRL\\Algebraic_Connectivity_Fresh_Rebase\\Algebraic_Connectivity_Fresh_Rebase\\results\\rl_analytic\\summary_quality.csv"
+  }
+}
